@@ -27,6 +27,8 @@ static const KeyBind leader_keys[] = {
     { 'w', cmd_switch_focus },
     { 's', cmd_save },
     { 'q', cmd_quit },
+    { 'Y', cmd_clip_copy },
+    { 'P', cmd_clip_paste },
 };
 
 /* Normal-mode bindings. */

@@ -87,6 +87,8 @@ void cmd_visual(void);
 void cmd_colon(void);
 void cmd_save(void);
 void cmd_quit(void);
+void cmd_clip_copy(void);
+void cmd_clip_paste(void);
 void cmd_fuzzy(void);
 void cmd_toggle_term(void);
 void cmd_switch_focus(void);

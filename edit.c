@@ -7,6 +7,7 @@
 #include "edit.h"
 #include "config.h"
 #include "fuzzy.h"
+#include "clipboard.h"
 
 Editor E;
 int g_quit = 0;
@@ -152,6 +153,41 @@ static void yank_set(char *s, size_t n) {
     free(ybuf);
     ybuf = s;
     ylen = n;
+}
+
+/* ------------------------------- clipboard -------------------------------- */
+
+static void sel_bounds(size_t *lo, size_t *hi); /* visual mode helper */
+
+/* Push the yank buffer (or the visual selection) into the system clipboard. */
+void cmd_clip_copy(void) {
+    if (E.mode == MODE_VISUAL) {
+        size_t lo, hi;
+        sel_bounds(&lo, &hi);
+        E.mode = MODE_NORMAL;
+        if (hi == lo) { edit_set_status("nothing to copy"); return; }
+        char *s = gb_slice(&E.buf.gb, lo, hi - lo);
+        int ok = clip_copy(s, hi - lo);
+        free(s);
+        if (ok == 0) edit_set_status("copied %zu bytes to clipboard", hi - lo);
+        else edit_set_status("clipboard unavailable");
+        return;
+    }
+    if (!ylen) { edit_set_status("nothing to copy (yank or select first)"); return; }
+    if (clip_copy(ybuf, ylen) == 0)
+        edit_set_status("copied %zu bytes to clipboard", ylen);
+    else
+        edit_set_status("clipboard unavailable");
+}
+
+/* Pull the system clipboard into the buffer at the cursor. */
+void cmd_clip_paste(void) {
+    size_t n = 0;
+    char *s = clip_paste(&n);
+    if (!s) { edit_set_status("clipboard unavailable"); return; }
+    ed_insert_chars(E.cur, s, n);
+    edit_set_status("pasted %zu bytes from clipboard", n);
+    free(s);
 }
 
 /* --------------------------------- motions -------------------------------- */

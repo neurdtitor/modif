@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index 2f320ce..9e1dd0c 100644
+index d4552c9..786817b 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,8 +1,8 @@
@@ -8,126 +8,138 @@ index 2f320ce..9e1dd0c 100644
 -LDLIBS   = $(shell uname -s | grep -q Linux && echo -lutil)
 +LDLIBS   = $(shell uname -s | grep -q Linux && echo "-lutil -ldl")
  
--OBJS = main.o buffer.o terminal.o input.o edit.o fuzzy.o pty.o clipboard.o
-+OBJS = main.o buffer.o terminal.o input.o edit.o fuzzy.o pty.o clipboard.o highlight.o
+-OBJS = main.o buffer.o terminal.o input.o edit.o fuzzy.o pty.o clipboard.o mc.o
++OBJS = main.o buffer.o terminal.o input.o edit.o fuzzy.o pty.o clipboard.o mc.o highlight.o
  
  modif: $(OBJS)
  	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDLIBS)
-diff --git a/README.md b/README.md
-index 666363d..db04392 100644
---- a/README.md
-+++ b/README.md
-@@ -137,6 +137,27 @@ helper is installed, you get a status message instead.
- A leader followed by an unbound key just cancels the leader; `Esc` also
- cancels it.
- 
-+### Syntax highlighting (tree-sitter)
-+
-+Syntax highlighting is provided by tree-sitter and is entirely optional: both
-+the runtime and the per-language parsers are loaded at runtime with
-+`dlopen()`, so the editor always builds and simply shows plain text when a
-+parser is missing. To enable it, install the `tree-sitter` runtime and the
-+parser libraries for the languages you use (rust, python, C, C++, javascript,
-+java are supported by default):
-+
-+- **macOS (Homebrew)**: `brew install tree-sitter tree-sitter-python` (and any
-+  other `tree-sitter-<lang>` formula that exists).
-+- **Linux**: install `libtree-sitter` and build the grammars with the
-+  tree-sitter CLI (`tree-sitter generate`), or use your distro's packages;
-+  the editor looks for `lib<lang>-tree-sitter.{dylib,so}` and
-+  `libtree-sitter-<lang>.{dylib,so}` in the loader path,
-+  `/opt/homebrew/lib`, `/usr/local/lib` and `~/.local/lib`.
-+
-+The file's extension picks the language (`.rs`, `.py`, `.c`/`.h`, `.cpp`/
-+`.cc`/`.hpp`, `.js`/`.mjs`/`.jsx`, `.java`). New languages can be added as a
-+small follow-up patch to the `lang_tab` table in `highlight.c`.
-+
- ### Counts & operators
- 
- Motions and editing commands take a leading count, like vim: `10e`, `18w`,
-@@ -148,7 +169,6 @@ extend the selection (`2j`, `10l`). `Esc` cancels a pending count or operator.
- ## Explicitly out of scope (for now)
- 
- - LSP / DAP
--- tree-sitter / real syntax highlighting (maybe simple regex highlighting later)
- - A runtime plugin system or embedded scripting language
- - Multiple cursors
- 
 diff --git a/edit.c b/edit.c
-index eede08a..b6150aa 100644
+index d482f66..9c09a14 100644
 --- a/edit.c
 +++ b/edit.c
-@@ -7,6 +7,7 @@
- #include "edit.h"
- #include "config.h"
+@@ -9,6 +9,7 @@
  #include "fuzzy.h"
-+#include "highlight.h"
  #include "clipboard.h"
+ #include "mc.h"
++#include "highlight.h"
  
  Editor E;
-@@ -136,6 +137,7 @@ static void ed_insert_chars(size_t pos, const char *s, size_t n) {
+ int g_quit = 0;
+@@ -100,6 +101,7 @@ static void ed_insert_chars(size_t pos, const char *s, size_t n) {
      buf_insert(&E.buf, pos, s, n);
      E.dirty = 1;
      E.cur = pos + n;
-+    hl_dirty();
++    hl_dirty(E.hl);
  }
  
  static void ed_del_range(size_t pos, size_t n) {
-@@ -145,6 +147,7 @@ static void ed_del_range(size_t pos, size_t n) {
+@@ -109,6 +111,7 @@ static void ed_del_range(size_t pos, size_t n) {
      free(s);
      buf_delete(&E.buf, pos, n);
      E.dirty = 1;
-+    hl_dirty();
++    hl_dirty(E.hl);
+ }
+ 
+ /* Raw edit primitives exported to mc.c: apply an edit and record it in the
+@@ -119,6 +122,7 @@ void ed_apply_insert(size_t pos, const char *s, size_t n) {
+     rec_insert(pos, s, n);
+     buf_insert(&E.buf, pos, s, n);
+     E.dirty = 1;
++    hl_dirty(E.hl);
+ }
+ 
+ void ed_apply_delete(size_t pos, const char *s, size_t n) {
+@@ -126,6 +130,7 @@ void ed_apply_delete(size_t pos, const char *s, size_t n) {
+     rec_delete(pos, s, n);
+     buf_delete(&E.buf, pos, n);
+     E.dirty = 1;
++    hl_dirty(E.hl);
  }
  
  static void ed_backspace(void) {
-@@ -472,6 +475,7 @@ void cmd_undo(void) {
-     u->cur = u->nodes[start].parent;
-     E.cur = u->nodes[start].pos;
+@@ -435,6 +440,7 @@ void cmd_paste_before(void) {
+     rec_insert(E.cur, ybuf, ylen);
+     buf_insert(&E.buf, E.cur, ybuf, ylen);
      E.dirty = 1;
-+    hl_dirty();
++    hl_dirty(E.hl);
  }
  
- void cmd_redo(void) {
-@@ -496,6 +500,7 @@ void cmd_redo(void) {
-         g = nxt;
+ /* --------------------------------- undo ----------------------------------- */
+@@ -450,6 +456,7 @@ void cmd_undo(void) {
+         E.cur = e->pos + e->len;
      }
      E.dirty = 1;
-+    hl_dirty();
++    hl_dirty(E.hl);
+     upos--;
  }
  
- /* ------------------------------ undo tree view ---------------------------- */
-@@ -1224,6 +1229,7 @@ void edit_handle_key(int key) {
+@@ -464,6 +471,7 @@ void cmd_redo(void) {
+         E.cur = e->pos;
+     }
+     E.dirty = 1;
++    hl_dirty(E.hl);
+     upos++;
+ }
+ 
+@@ -1056,6 +1064,7 @@ void edit_handle_key(int key) {
  }
  
  void edit_after(void) {
-+    hl_update(&E.buf); /* re-parse lazily after edits, before rendering */
++    hl_update(E.hl, &E.buf); /* re-parse lazily after edits, before rendering */
      size_t len = gb_len(&E.buf.gb);
      if (E.cur > len) E.cur = len;
-     size_t content_rows = E.screen_rows > 1 ? (size_t)(E.screen_rows - 1) : 1;
-@@ -1353,6 +1359,8 @@ void edit_init(void) {
+     if (mc_active()) mc_clamp(len);
+@@ -1140,6 +1149,7 @@ void edit_init(void) {
+     E.bl = malloc(sizeof(BufList));
+     bl_init(E.bl);
+     mc_init();
++    E.hl = hl_init();
+     buf_init(&E.buf);
+     buf_build_lines(&E.buf); /* always at least one empty line */
+     buf_add(&E.buf);
+@@ -1178,6 +1188,8 @@ void edit_init(void) {
+ }
  
  void edit_open(const char *path) {
-     undo_close();
-+    const char *hint = hl_hint(path);
++    const char *hint = hl_hint(E.hl, path);
 +    if (hint) edit_set_status("%s", hint);
      /* switch to an already-open buffer with the same name */
-     for (size_t i = 0; i < E.nb; i++)
-         if (E.blist[i].name && !strcmp(E.blist[i].name, path)) {
-@@ -1389,6 +1397,7 @@ void edit_open(const char *path) {
-     }
+     for (size_t i = 0; i < E.bl->n; i++)
+         if (E.bl->bufs[i].name && !strcmp(E.bl->bufs[i].name, path)) {
+@@ -1222,6 +1234,7 @@ opened:
+     E.sqlen = 0;
+     E.smatch = (size_t)-1;
+     E.sactive = 0;
++    hl_dirty(E.hl); /* new file: pick a language and re-parse */
+     leader = 0;
+     count_reset();
+ }
+diff --git a/edit.h b/edit.h
+index 3793650..77d3f12 100644
+--- a/edit.h
++++ b/edit.h
+@@ -5,6 +5,7 @@
+ #include <time.h>
+ #include "buffer.h"
+ #include "mc.h"
++#include "highlight.h"
  
- opened:
-+    hl_dirty(); /* new file: pick a language and re-parse */
-     E.cmdlen = 0;
-     E.cmdq[0] = '\0';
-     E.mode = MODE_NORMAL;
+ typedef void (*cmd_fn)(void);
+ typedef struct { int key; cmd_fn fn; } KeyBind;
+@@ -48,6 +49,7 @@ typedef struct {
+     int fsel;
+     int fbuf;         /* 1 = fuzzy matching open buffers, 0 = files */
+     MCState *mc;      /* multi-cursor state (mc.c owns the struct) */
++    HLState *hl;      /* syntax-highlight state (highlight.c owns the struct) */
+ } Editor;
+ 
+ extern Editor E;
 diff --git a/highlight.c b/highlight.c
 new file mode 100644
-index 0000000..aa5a684
+index 0000000..5e9bcc1
 --- /dev/null
 +++ b/highlight.c
-@@ -0,0 +1,399 @@
+@@ -0,0 +1,452 @@
 +#include <ctype.h>
 +#include <dlfcn.h>
 +#include <stdint.h>
@@ -137,15 +149,16 @@ index 0000000..aa5a684
 +#include "highlight.h"
 +#include "tree_sitter/api.h"
 +
-+/* Syntax highlighting through tree-sitter. Both the runtime library
-+ * (libtree-sitter) and the per-language parser shared libraries are loaded
-+ * at runtime with dlopen(), so the editor always builds and simply shows
-+ * plain text when a parser is missing. To enable highlighting install the
-+ * tree-sitter runtime and the parser libraries for the languages you use
-+ * (see README). Each language parser must export `tree_sitter_<lang>`.
++/* Syntax highlighting through tree-sitter queries. Both the runtime library
++ * (libtree-sitter) and the per-language parser shared libraries are loaded at
++ * runtime with dlopen(), so the editor always builds and simply shows plain
++ * text when a parser is missing. Each language's colors come from a standard
++ * query file, queries/<lang>/highlights.scm — adding a language is just
++ * dropping in a parser library plus a query file, no C changes.
 + *
-+ * The vendored tree_sitter/api.h pins the ABI of the runtime this was
-+ * tested against (tree-sitter >= 0.21). */
++ * All state lives in the HLState struct (highlight.h); the Editor only holds
++ * a pointer to it. The vendored tree_sitter/api.h pins the ABI of the runtime
++ * this was tested against (tree-sitter >= 0.21). */
 +
 +/* ----------------------- dynamically resolved runtime ---------------------- */
 +
@@ -157,13 +170,16 @@ index 0000000..aa5a684
 +    TSTree *(*parser_parse_string)(TSParser *, const TSTree *, const char *, uint32_t);
 +    void (*tree_delete)(TSTree *);
 +    TSNode (*tree_root_node)(const TSTree *);
-+    const char *(*node_type)(TSNode);
-+    bool (*node_is_named)(TSNode);
-+    uint32_t (*node_child_count)(TSNode);
-+    TSNode (*node_child)(TSNode, uint32_t);
 +    uint32_t (*node_start_byte)(TSNode);
 +    uint32_t (*node_end_byte)(TSNode);
-+    TSNode (*node_parent)(TSNode);
++    TSQuery *(*query_new)(const TSLanguage *, const char *, uint32_t,
++                          uint32_t *, TSQueryError *);
++    void (*query_delete)(TSQuery *);
++    const char *(*query_capture_name_for_id)(const TSQuery *, uint32_t, uint32_t *);
++    TSQueryCursor *(*query_cursor_new)(void);
++    void (*query_cursor_delete)(TSQueryCursor *);
++    void (*query_cursor_exec)(TSQueryCursor *, const TSQuery *, TSNode);
++    bool (*query_cursor_next_capture)(TSQueryCursor *, TSQueryMatch *, uint32_t *);
 +} TSRt;
 +
 +typedef struct {
@@ -172,38 +188,49 @@ index 0000000..aa5a684
 +    const char *exts[7];
 +    void *dl;
 +    const TSLanguage *(*get)(void);
++    TSQuery *query; /* compiled from queries/<name>/highlights.scm */
 +} HLLang;
 +
-+static TSRt rt;
-+static int rt_ok;
-+static HLLang *langs;
-+static size_t nlang, lang_loaded;
++struct HLState {
++    TSRt rt;
++    int rt_ok;
++    HLLang *langs;
++    size_t nlang;
++    size_t lang_loaded;
++    TSParser *parser;
++    TSTree *tree;
++    TSQueryCursor *cursor;
++    uint8_t *classes;
++    size_t classes_len, classes_cap;
++    int s_dirty;
++    HLLang *active;
++};
 +
 +static HLLang lang_tab[] = {
 +    { "rust",
 +      { "librust-tree-sitter.dylib", "libtree-sitter-rust.dylib",
 +        "librust-tree-sitter.so", "libtree-sitter-rust.so", NULL },
-+      { "rs", NULL }, NULL, NULL },
++      { "rs", NULL }, NULL, NULL, NULL },
 +    { "python",
 +      { "libpython-tree-sitter.dylib", "libtree-sitter-python.dylib",
 +        "libpython-tree-sitter.so", "libtree-sitter-python.so", NULL },
-+      { "py", "pyi", NULL }, NULL, NULL },
++      { "py", "pyi", NULL }, NULL, NULL, NULL },
 +    { "c",
 +      { "libc-tree-sitter.dylib", "libtree-sitter-c.dylib",
 +        "libc-tree-sitter.so", "libtree-sitter-c.so", NULL },
-+      { "c", "h", NULL }, NULL, NULL },
++      { "c", "h", NULL }, NULL, NULL, NULL },
 +    { "cpp",
 +      { "libcpp-tree-sitter.dylib", "libtree-sitter-cpp.dylib",
 +        "libcpp-tree-sitter.so", "libtree-sitter-cpp.so", NULL },
-+      { "cc", "cpp", "cxx", "hpp", "hh", "hxx", NULL }, NULL, NULL },
++      { "cc", "cpp", "cxx", "hpp", "hh", "hxx", NULL }, NULL, NULL, NULL },
 +    { "javascript",
 +      { "libjavascript-tree-sitter.dylib", "libtree-sitter-javascript.dylib",
 +        "libjavascript-tree-sitter.so", "libtree-sitter-javascript.so", NULL },
-+      { "js", "mjs", "cjs", "jsx", NULL }, NULL, NULL },
++      { "js", "mjs", "cjs", "jsx", NULL }, NULL, NULL, NULL },
 +    { "java",
 +      { "libjava-tree-sitter.dylib", "libtree-sitter-java.dylib",
 +        "libjava-tree-sitter.so", "libtree-sitter-java.so", NULL },
-+      { "java", NULL }, NULL, NULL },
++      { "java", NULL }, NULL, NULL, NULL },
 +};
 +
 +/* Try to open a shared library, first by plain name (loader search path),
@@ -236,7 +263,8 @@ index 0000000..aa5a684
 +#define LOAD(field, sym) do { *(void **)(&rt.field) = dlsym_checked(rt.dl, sym); \
 +    if (!rt.field) return; } while (0)
 +
-+static void rt_load(void) {
++static void rt_load(HLState *h) {
++    TSRt rt = h->rt;
 +    rt.dl = try_dlopen("libtree-sitter.dylib");
 +    if (!rt.dl) rt.dl = try_dlopen("libtree-sitter.so");
 +    if (!rt.dl) return;
@@ -246,175 +274,188 @@ index 0000000..aa5a684
 +    LOAD(parser_parse_string, "ts_parser_parse_string");
 +    LOAD(tree_delete, "ts_tree_delete");
 +    LOAD(tree_root_node, "ts_tree_root_node");
-+    LOAD(node_type, "ts_node_type");
-+    LOAD(node_is_named, "ts_node_is_named");
-+    LOAD(node_child_count, "ts_node_child_count");
-+    LOAD(node_child, "ts_node_child");
 +    LOAD(node_start_byte, "ts_node_start_byte");
 +    LOAD(node_end_byte, "ts_node_end_byte");
-+    LOAD(node_parent, "ts_node_parent");
-+    rt_ok = 1;
++    LOAD(query_new, "ts_query_new");
++    LOAD(query_delete, "ts_query_delete");
++    LOAD(query_capture_name_for_id, "ts_query_capture_name_for_id");
++    LOAD(query_cursor_new, "ts_query_cursor_new");
++    LOAD(query_cursor_delete, "ts_query_cursor_delete");
++    LOAD(query_cursor_exec, "ts_query_cursor_exec");
++    LOAD(query_cursor_next_capture, "ts_query_cursor_next_capture");
++    h->rt = rt;
++    h->rt_ok = 1;
 +}
 +
 +/* ------------------------------ language table ----------------------------- */
 +
-+static HLLang *lang_for_ext(const char *name) {
++static HLLang *lang_for_ext(HLState *h, const char *name) {
 +    if (!name) return NULL;
 +    const char *dot = strrchr(name, '.');
 +    if (!dot || !dot[1]) return NULL;
-+    for (size_t i = 0; i < nlang; i++) {
-+        if (!langs[i].get) continue;
-+        for (size_t j = 0; langs[i].exts[j]; j++)
-+            if (!strcmp(dot + 1, langs[i].exts[j])) return &langs[i];
++    for (size_t i = 0; i < h->nlang; i++) {
++        if (!h->langs[i].get) continue;
++        for (size_t j = 0; h->langs[i].exts[j]; j++)
++            if (!strcmp(dot + 1, h->langs[i].exts[j])) return &h->langs[i];
 +    }
 +    return NULL;
 +}
 +
 +/* The language a filename maps to, whether or not its parser is loaded. */
-+static HLLang *lang_known(const char *name) {
++static HLLang *lang_known(HLState *h, const char *name) {
 +    if (!name) return NULL;
 +    const char *dot = strrchr(name, '.');
 +    if (!dot || !dot[1]) return NULL;
-+    for (size_t i = 0; i < nlang; i++) {
-+        for (size_t j = 0; langs[i].exts[j]; j++)
-+            if (!strcmp(dot + 1, langs[i].exts[j])) return &langs[i];
++    for (size_t i = 0; i < h->nlang; i++) {
++        for (size_t j = 0; h->langs[i].exts[j]; j++)
++            if (!strcmp(dot + 1, h->langs[i].exts[j])) return &h->langs[i];
 +    }
 +    return NULL;
 +}
 +
-+/* ------------------------------ parse + color ------------------------------ */
++/* ------------------------- query file loading ------------------------------ */
 +
-+static TSParser *parser;
-+static TSTree *tree;
-+static uint8_t *classes;
-+static size_t classes_len, classes_cap;
-+static int s_dirty;
-+static HLLang *active;
-+
-+static const char *const keywords[] = {
-+    "and", "as", "assert", "async", "await", "break", "case", "catch",
-+    "class", "const", "constexpr", "continue", "def", "default", "delete",
-+    "do", "elif", "else", "enum", "except", "export", "extern", "extends",
-+    "false", "finally", "fn", "for", "from", "func", "function", "get",
-+    "global", "goto", "if", "impl", "import", "in", "include", "inline",
-+    "instanceof", "is", "lambda", "let", "loop", "match", "mod", "move",
-+    "mut", "namespace", "new", "nonlocal", "not", "null", "nullptr",
-+    "of", "operator", "or", "out", "override", "package", "pass", "private",
-+    "protected", "public", "pub", "raise", "return", "self", "set", "signed",
-+    "sizeof", "static", "struct", "super", "switch", "this", "throw", "true",
-+    "try", "type", "typedef", "typename", "union", "unsigned", "unsafe",
-+    "use", "using", "var", "virtual", "void", "volatile", "while", "with",
-+    "yield", NULL,
-+};
-+
-+static int is_keyword(const char *t) {
-+    for (size_t i = 0; keywords[i]; i++)
-+        if (!strcmp(t, keywords[i])) return 1;
-+    return 0;
-+}
-+
-+/* Exact node-type names worth highlighting. */
-+static const struct { const char *t; int cat; } named_map[] = {
-+    { "comment", HL_COMMENT },
-+    { "line_comment", HL_COMMENT },
-+    { "block_comment", HL_COMMENT },
-+    { "comment_block", HL_COMMENT },
-+    { "string_literal", HL_STRING },
-+    { "string", HL_STRING },
-+    { "interpreted_string_literal", HL_STRING },
-+    { "raw_string_literal", HL_STRING },
-+    { "raw_string", HL_STRING },
-+    { "char_literal", HL_STRING },
-+    { "byte_string_literal", HL_STRING },
-+    { "byte_char", HL_STRING },
-+    { "template_string", HL_STRING },
-+    { "concatenated_string", HL_STRING },
-+    { "regex", HL_STRING },
-+    { "number_literal", HL_NUMBER },
-+    { "integer_literal", HL_NUMBER },
-+    { "float_literal", HL_NUMBER },
-+    { "decimal_integer_literal", HL_NUMBER },
-+    { "hex_integer_literal", HL_NUMBER },
-+    { "octal_integer_literal", HL_NUMBER },
-+    { "binary_integer_literal", HL_NUMBER },
-+    { "unsigned_integer_literal", HL_NUMBER },
-+    { "real_literal", HL_NUMBER },
-+    { "integer", HL_NUMBER },
-+    { "float", HL_NUMBER },
-+    { "type_identifier", HL_TYPE },
-+    { "primitive_type", HL_TYPE },
-+    { "type", HL_TYPE },
-+    { "namespace_identifier", HL_NAMESPACE },
-+    { "preproc_include", HL_PREPROC },
-+    { "preproc_def", HL_PREPROC },
-+    { "preproc_call", HL_PREPROC },
-+    { "preproc_if", HL_PREPROC },
-+    { "preproc_else", HL_PREPROC },
-+    { "preproc_endif", HL_PREPROC },
-+    { "preproc_directive", HL_PREPROC },
-+    { "attribute", HL_PREPROC },
-+    { "decorator", HL_PREPROC },
-+    { "macro_invocation", HL_MACRO },
-+    { "storage_class", HL_KEYWORD },
-+    { "label", HL_LABEL },
-+    { "true", HL_CONST },
-+    { "false", HL_CONST },
-+    { "null", HL_CONST },
-+    { "boolean_literal", HL_CONST },
-+    { NULL, HL_NONE },
-+};
-+
-+static int hl_lookup(const char *t) {
-+    for (size_t i = 0; named_map[i].t; i++)
-+        if (!strcmp(t, named_map[i].t)) return named_map[i].cat;
-+    return HL_NONE;
-+}
-+
-+static int hl_classify(TSNode n) {
-+    const char *t = rt.node_type(n);
-+    if (rt.node_is_named(n)) {
-+        int c = hl_lookup(t);
-+        if (c) return c;
-+        if (strstr(t, "string")) return HL_STRING;
-+        if (strstr(t, "integer") || strstr(t, "float") ||
-+            strstr(t, "number") || strstr(t, "real"))
-+            return HL_NUMBER;
-+        if (!strcmp(t, "identifier") || !strcmp(t, "name") ||
-+            !strcmp(t, "field_identifier")) {
-+            TSNode p = rt.node_parent(n);
-+            if (p.id) {
-+                const char *pt = rt.node_type(p);
-+                if (strstr(pt, "function") || strstr(pt, "method") ||
-+                    strstr(pt, "call"))
-+                    return HL_FUNC;
-+                if (strstr(pt, "type"))
-+                    return HL_TYPE;
-+            }
-+            return HL_NONE;
-+        }
-+        if (is_keyword(t)) return HL_KEYWORD;
-+        return HL_NONE;
++/* Read queries/<lang>/highlights.scm, honouring the MODIF_QUERY_DIR
++ * environment variable as the queries directory (default: "queries" in the
++ * current directory). Returns malloc'd NUL-terminated source, or NULL. */
++static char *query_read(const char *lang) {
++    const char *dir = getenv("MODIF_QUERY_DIR");
++    if (!dir || !*dir) dir = "queries";
++    char path[1024];
++    snprintf(path, sizeof path, "%s/%s/highlights.scm", dir, lang);
++    FILE *f = fopen(path, "rb");
++    if (!f) return NULL;
++    fseek(f, 0, SEEK_END);
++    long n = ftell(f);
++    fseek(f, 0, SEEK_SET);
++    if (n < 0) { fclose(f); return NULL; }
++    char *src = malloc((size_t)n + 1);
++    if (src && n > 0 && fread(src, 1, (size_t)n, f) != (size_t)n) {
++        free(src);
++        src = NULL;
 +    }
-+    /* unnamed leaf: t is the literal token text */
-+    if (t[0] == '\0') return HL_NONE;
-+    if (isalpha((unsigned char)t[0]))
-+        return is_keyword(t) ? HL_KEYWORD : HL_NONE;
-+    if (isdigit((unsigned char)t[0])) return HL_NUMBER;
-+    if (strspn(t, "+-*/%=<>!&|^~?:") == strlen(t)) return HL_OP;
++    fclose(f);
++    if (src) src[n] = '\0';
++    return src;
++}
++
++/* Compile a language's highlights.scm into a TSQuery, or NULL if there is no
++ * query file or it fails to parse. */
++static TSQuery *query_compile(HLState *h, HLLang *l) {
++    char *src = query_read(l->name);
++    if (!src) return NULL;
++    uint32_t err_off = 0;
++    TSQueryError err = TSQueryErrorNone;
++    TSQuery *q = h->rt.query_new(l->get(), src, (uint32_t)strlen(src),
++                                 &err_off, &err);
++    if (!q)
++        fprintf(stderr, "modif: query error in %s/highlights.scm at byte %u\n",
++                l->name, err_off);
++    free(src);
++    return q;
++}
++
++/* ------------------------- capture name -> category ------------------------ */
++
++/* Map a query capture name (without the leading @) to a highlight category.
++ * Matches the dotted name first, then its base segment, so @keyword.function
++ * and @keyword both land on HL_KEYWORD while @variable.member can be given a
++ * distinct category. Unknown captures are HL_NONE (no color). */
++static int capture_class(const char *name) {
++    static const struct { const char *cap; int cat; } map[] = {
++        { "variable.member", HL_FIELD },
++        { "variable.parameter", HL_PARAM },
++        { "keyword", HL_KEYWORD },
++        { "keyword.function", HL_KEYWORD },
++        { "keyword.operator", HL_KEYWORD },
++        { "keyword.return", HL_KEYWORD },
++        { "keyword.type", HL_KEYWORD },
++        { "type", HL_TYPE },
++        { "type.builtin", HL_TYPE },
++        { "type.definition", HL_TYPE },
++        { "string", HL_STRING },
++        { "string.escape", HL_STRING },
++        { "string.special", HL_STRING },
++        { "string.regexp", HL_STRING },
++        { "character", HL_STRING },
++        { "character.special", HL_STRING },
++        { "comment", HL_COMMENT },
++        { "comment.documentation", HL_COMMENT },
++        { "number", HL_NUMBER },
++        { "number.float", HL_NUMBER },
++        { "float", HL_NUMBER },
++        { "function", HL_FUNC },
++        { "function.call", HL_FUNC },
++        { "function.builtin", HL_FUNC },
++        { "function.macro", HL_FUNC },
++        { "method", HL_FUNC },
++        { "method.call", HL_FUNC },
++        { "constant", HL_CONST },
++        { "constant.builtin", HL_CONST },
++        { "constant.macro", HL_CONST },
++        { "boolean", HL_CONST },
++        { "nil", HL_CONST },
++        { "preproc", HL_PREPROC },
++        { "preproc.include", HL_PREPROC },
++        { "include", HL_PREPROC },
++        { "define", HL_PREPROC },
++        { "conditional", HL_PREPROC },
++        { "directive", HL_PREPROC },
++        { "operator", HL_OP },
++        { "field", HL_FIELD },
++        { "property", HL_FIELD },
++        { "namespace", HL_NAMESPACE },
++        { "module", HL_NAMESPACE },
++        { "parameter", HL_PARAM },
++        { "label", HL_LABEL },
++        { "macro", HL_MACRO },
++        { "punctuation", HL_PUNCT },
++        { "punctuation.bracket", HL_PUNCT },
++        { "punctuation.delimiter", HL_PUNCT },
++        { "punctuation.special", HL_PUNCT },
++        { "punct", HL_PUNCT },
++        { "tag", HL_SPECIAL },
++        { "tag.attribute", HL_SPECIAL },
++        { "tag.delimiter", HL_SPECIAL },
++        { "attribute", HL_PREPROC },
++        { NULL, HL_NONE },
++    };
++    if (!name) return HL_NONE;
++    for (size_t i = 0; map[i].cap; i++)
++        if (!strcmp(name, map[i].cap)) return map[i].cat;
++    char base[64];
++    size_t n = strcspn(name, ".");
++    if (n >= sizeof base) n = sizeof base - 1;
++    memcpy(base, name, n);
++    base[n] = '\0';
++    for (size_t i = 0; map[i].cap; i++)
++        if (!strcmp(base, map[i].cap)) return map[i].cat;
 +    return HL_NONE;
 +}
 +
-+static void hl_walk(TSNode n) {
-+    uint32_t s = rt.node_start_byte(n), e = rt.node_end_byte(n);
-+    int c = hl_classify(n);
-+    if (c != HL_NONE && e > s && s < classes_len) {
++/* Run the active language's query over the parse tree, filling classes[] with
++ * a category per byte. */
++static void hl_run_query(HLState *h, TSNode root) {
++    if (!h->active || !h->active->query) return;
++    if (!h->cursor) h->cursor = h->rt.query_cursor_new();
++    h->rt.query_cursor_exec(h->cursor, h->active->query, root);
++    TSQueryMatch match;
++    uint32_t cap_idx;
++    while (h->rt.query_cursor_next_capture(h->cursor, &match, &cap_idx)) {
++        if (cap_idx >= match.capture_count) continue;
++        TSQueryCapture cap = match.captures[cap_idx];
++        uint32_t nlen = 0;
++        const char *cname = h->rt.query_capture_name_for_id(
++            h->active->query, cap.index, &nlen);
++        int cat = capture_class(cname);
++        if (cat == HL_NONE) continue;
++        uint32_t s = h->rt.node_start_byte(cap.node);
++        uint32_t e = h->rt.node_end_byte(cap.node);
++        if (e <= s || s >= h->classes_len) continue;
 +        size_t nbytes = e - s;
-+        if (s + nbytes > classes_len) nbytes = classes_len - s;
-+        memset(classes + s, c, nbytes);
++        if (s + nbytes > h->classes_len) nbytes = h->classes_len - s;
++        memset(h->classes + s, cat, nbytes);
 +    }
-+    uint32_t nc = rt.node_child_count(n);
-+    for (uint32_t i = 0; i < nc; i++)
-+        hl_walk(rt.node_child(n, i));
 +}
 +
 +/* -------------------------------- palette ---------------------------------- */
@@ -445,95 +486,119 @@ index 0000000..aa5a684
 +
 +/* -------------------------------- public API ------------------------------- */
 +
-+int hl_runtime_ok(void) { return rt_ok; }
-+int hl_lang_count(void) { return lang_loaded; }
-+int hl_active(void) { return rt_ok && active && active->get; }
-+
-+/* If highlighting can't run for a file of this name, return a short, static
-+ * message saying what to install; otherwise NULL. */
-+const char *hl_hint(const char *name) {
-+    if (!rt_ok) return "tree-sitter runtime not found; install libtree-sitter";
-+    HLLang *k = lang_known(name);
-+    if (!k) return NULL;             /* no parser for this file type */
-+    if (k->get) return NULL;         /* parser available: highlighting works */
-+    static char msg[128];
-+    snprintf(msg, sizeof msg,
-+             "syntax: no tree-sitter parser for %s; install lib%s-tree-sitter",
-+             k->name, k->name);
-+    return msg;
-+}
-+
-+void hl_dirty(void) { s_dirty = 1; }
-+
-+void hl_init(void) {
-+    rt_load();
-+    if (!rt_ok) return;
-+    parser = rt.parser_new();
-+    if (!parser) return;
-+    langs = lang_tab;
-+    nlang = sizeof lang_tab / sizeof lang_tab[0];
++HLState *hl_init(void) {
++    HLState *h = calloc(1, sizeof *h);
++    if (!h) return NULL;
++    rt_load(h);
++    if (!h->rt_ok) return h;
++    h->parser = h->rt.parser_new();
++    if (!h->parser) return h;
++    h->langs = lang_tab;
++    h->nlang = sizeof lang_tab / sizeof lang_tab[0];
 +    char sym[128];
-+    for (size_t i = 0; i < nlang; i++) {
-+        for (size_t j = 0; langs[i].libs[j]; j++) {
-+            void *dl = try_dlopen(langs[i].libs[j]);
++    for (size_t i = 0; i < h->nlang; i++) {
++        for (size_t j = 0; h->langs[i].libs[j]; j++) {
++            void *dl = try_dlopen(h->langs[i].libs[j]);
 +            if (!dl) continue;
-+            snprintf(sym, sizeof sym, "tree_sitter_%s", langs[i].name);
-+            langs[i].get = (const TSLanguage *(*)(void))dlsym_checked(dl, sym);
-+            if (langs[i].get) {
-+                langs[i].dl = dl;
-+                lang_loaded++;
++            snprintf(sym, sizeof sym, "tree_sitter_%s", h->langs[i].name);
++            h->langs[i].get = (const TSLanguage *(*)(void))dlsym_checked(dl, sym);
++            if (h->langs[i].get) {
++                h->langs[i].dl = dl;
++                h->lang_loaded++;
++                h->langs[i].query = query_compile(h, &h->langs[i]);
 +                break;
 +            }
 +            dlclose(dl);
 +        }
 +    }
++    return h;
 +}
 +
-+const uint8_t *hl_classes(size_t *len) {
-+    if (len) *len = classes_len;
-+    return classes;
++void hl_free(HLState *h) {
++    if (!h) return;
++    if (h->rt_ok) {
++        for (size_t i = 0; i < h->nlang; i++) {
++            if (h->langs[i].query) h->rt.query_delete(h->langs[i].query);
++            if (h->langs[i].dl) dlclose(h->langs[i].dl);
++        }
++        if (h->tree) h->rt.tree_delete(h->tree);
++        if (h->cursor) h->rt.query_cursor_delete(h->cursor);
++        h->rt.parser_delete(h->parser);
++    }
++    free(h->classes);
++    free(h);
 +}
 +
-+void hl_update(Buffer *buf) {
-+    if (!s_dirty) return;
-+    s_dirty = 0;
-+    if (!rt_ok || !parser) return;
-+    HLLang *l = lang_for_ext(buf->name);
-+    if (l != active) {
-+        active = l;
-+        if (!l || !rt.parser_set_language(parser, l->get())) {
-+            active = NULL;
-+            if (tree) { rt.tree_delete(tree); tree = NULL; }
++int hl_runtime_ok(HLState *h) { return h && h->rt_ok; }
++int hl_lang_count(HLState *h) { return h ? (int)h->lang_loaded : 0; }
++int hl_active(HLState *h) { return h && h->rt_ok && h->active && h->active->query; }
++
++/* If highlighting can't run for a file of this name, return a short, static
++ * message saying what to install; otherwise NULL. */
++const char *hl_hint(HLState *h, const char *name) {
++    if (!h || !h->rt_ok) return "tree-sitter runtime not found; install libtree-sitter";
++    HLLang *k = lang_known(h, name);
++    if (!k) return NULL;             /* no parser for this file type */
++    if (k->get && k->query) return NULL; /* everything available */
++    if (!k->get) {
++        static char msg[128];
++        snprintf(msg, sizeof msg,
++                 "syntax: no tree-sitter parser for %s; install lib%s-tree-sitter",
++                 k->name, k->name);
++        return msg;
++    }
++    return "syntax: missing queries/<lang>/highlights.scm for this file";
++}
++
++void hl_dirty(HLState *h) {
++    if (h) h->s_dirty = 1;
++}
++
++const uint8_t *hl_classes(HLState *h, size_t *len) {
++    if (len) *len = h ? h->classes_len : 0;
++    return h ? h->classes : NULL;
++}
++
++void hl_update(HLState *h, Buffer *buf) {
++    if (!h || !h->s_dirty) return;
++    h->s_dirty = 0;
++    if (!h->rt_ok || !h->parser) return;
++    HLLang *l = lang_for_ext(h, buf->name);
++    if (l != h->active) {
++        h->active = l;
++        if (!l || !h->rt.parser_set_language(h->parser, l->get())) {
++            h->active = NULL;
++            if (h->tree) { h->rt.tree_delete(h->tree); h->tree = NULL; }
 +            return;
 +        }
 +    }
-+    if (!active) return;
++    if (!h->active || !h->active->query) return;
 +
 +    size_t len = gb_len(&buf->gb);
 +    if (len > 0x7fffffffu) return; /* tree-sitter takes uint32 lengths */
 +    char *src = gb_slice(&buf->gb, 0, len);
-+    if (tree) { rt.tree_delete(tree); tree = NULL; }
-+    tree = rt.parser_parse_string(parser, NULL, src, (uint32_t)len);
++    if (h->tree) { h->rt.tree_delete(h->tree); h->tree = NULL; }
++    h->tree = h->rt.parser_parse_string(h->parser, NULL, src, (uint32_t)len);
 +    free(src);
-+    if (!tree) return;
++    if (!h->tree) return;
 +
-+    if (classes_cap < len) {
-+        classes_cap = len ? len : 1;
-+        classes = realloc(classes, classes_cap);
++    if (h->classes_cap < len) {
++        h->classes_cap = len ? len : 1;
++        h->classes = realloc(h->classes, h->classes_cap);
 +    }
-+    classes_len = len;
++    h->classes_len = len;
 +    if (len) {
-+        memset(classes, 0, len);
-+        hl_walk(rt.tree_root_node(tree));
++        memset(h->classes, 0, len);
++        hl_run_query(h, h->rt.tree_root_node(h->tree));
 +    }
 +}
 \ No newline at end of file
 diff --git a/highlight.h b/highlight.h
 new file mode 100644
-index 0000000..42d69b5
+index 0000000..08e9ce6
 --- /dev/null
 +++ b/highlight.h
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,46 @@
 +#ifndef MODIF_HIGHLIGHT_H
 +#define MODIF_HIGHLIGHT_H
 +
@@ -549,84 +614,103 @@ index 0000000..42d69b5
 +    HL_COUNT
 +};
 +
++/* Opaque. highlight.c owns every byte of it; the Editor just holds a
++ * pointer, and main.c / edit.c only call the functions below. */
++typedef struct HLState HLState;
++
 +/* 256-color index for a category, or -1 to use the terminal default. */
 +int hl_color(int cat);
 +
-+/* Load the tree-sitter runtime and language parsers (dlopen at runtime, so
-+ * the editor builds fine without them). Call once at startup. */
-+void hl_init(void);
-+int hl_runtime_ok(void);
-+int hl_lang_count(void);
-+int hl_active(void);
++/* Load the tree-sitter runtime, the per-language parsers and their
++ * queries/<lang>/highlights.scm query files. Call once at startup. */
++HLState *hl_init(void);
++void hl_free(HLState *h);
++int hl_runtime_ok(HLState *h);
++int hl_lang_count(HLState *h);
++int hl_active(HLState *h);
 +
-+/* If highlighting can't run for a file of this name (missing runtime or a
-+ * missing language parser), returns a short static message; else NULL. */
-+const char *hl_hint(const char *name);
++/* If highlighting can't run for a file of this name (missing runtime, parser
++ * or query file), returns a short static message; else NULL. */
++const char *hl_hint(HLState *h, const char *name);
 +
 +/* Mark the highlighted text as stale; hl_update() re-parses lazily. */
-+void hl_dirty(void);
++void hl_dirty(HLState *h);
 +
 +/* Re-parse buf (if stale and a matching language parser is available) and
-+ * rebuild the per-byte color class table. Safe to call every frame. */
-+void hl_update(Buffer *buf);
++ * rebuild the per-byte color class table from the language's highlights.scm.
++ * Safe to call every frame. */
++void hl_update(HLState *h, Buffer *buf);
 +
 +/* Byte-indexed color-class table from the last hl_update(), and its length. */
-+const uint8_t *hl_classes(size_t *len);
++const uint8_t *hl_classes(HLState *h, size_t *len);
 +
 +#endif
 \ No newline at end of file
 diff --git a/main.c b/main.c
-index 8781edb..3280cd2 100644
+index 7e6792d..747eebe 100644
 --- a/main.c
 +++ b/main.c
-@@ -9,6 +9,7 @@
- #include "edit.h"
+@@ -10,6 +10,7 @@
  #include "config.h"
  #include "pty.h"
+ #include "mc.h"
 +#include "highlight.h"
  
  /* ------------------------------- append buffer ---------------------------- */
  
-@@ -116,7 +117,8 @@ static void ab_bg(struct abuf *ab, int idx) {
-  * (raw char indices within the line) in reverse video. */
+@@ -113,12 +114,14 @@ static void ab_bg(struct abuf *ab, int idx) {
+ }
+ 
+ /* Render a line's visible window [skip, skip+maxc), expanding tabs and
+- * highlighting occurrences of q, the selection range hl0..hl1 and any
+- * multi-cursor positions in cc[0..ncc) (raw char indices within the line) in
+- * reverse video. */
++ * highlighting occurrences of q, the selection range hl0..hl1, any
++ * multi-cursor positions in cc[0..ncc) and the syntax colors in hl[0..hllen)
++ * (all raw char indices within the line). Syntax colors are foreground;
++ * everything else is reverse video. */
  static void render_line(struct abuf *ab, const char *raw, size_t rawlen,
                          size_t skip, size_t maxc, const char *q, size_t qlen,
--                        size_t hl0, size_t hl1) {
-+                        size_t hl0, size_t hl1, const uint8_t *hl,
-+                        size_t hllen) {
+-                        size_t hl0, size_t hl1, const size_t *cc, size_t ncc) {
++                        size_t hl0, size_t hl1, const size_t *cc, size_t ncc,
++                        const uint8_t *hl, size_t hllen) {
      size_t col = 0;
      size_t mstart[32];
      size_t nm = 0;
-@@ -125,9 +127,12 @@ static void render_line(struct abuf *ab, const char *raw, size_t rawlen,
+@@ -127,6 +130,7 @@ static void render_line(struct abuf *ab, const char *raw, size_t rawlen,
              if (!memcmp(raw + i, q, qlen)) mstart[nm++] = i;
      }
      size_t mi = 0;
 +    int curhl = -1;
-     for (size_t i = 0; i < rawlen; i++) {
-         if (nm && mi < nm && i == mstart[mi] + qlen) mi++;
-         int inm = (nm && mi < nm && i >= mstart[mi]) || (i >= hl0 && i < hl1);
+     int padcur = 0;
+     for (size_t k = 0; k < ncc; k++)
+         if (cc[k] == rawlen) padcur = 1;
+@@ -136,6 +140,8 @@ static void render_line(struct abuf *ab, const char *raw, size_t rawlen,
+         int iscur = 0;
+         for (size_t k = 0; k < ncc && !iscur; k++)
+             if (cc[k] == i) iscur = 1;
 +        int hc = (hl && i < hllen) ? hl_color(hl[i]) : -1;
 +        if (hc != curhl) { ab_fg(ab, hc); curhl = hc; }
          char c = raw[i];
          if (c == '\t') {
              size_t stop = (col / MODIF_TABSTOP + 1) * MODIF_TABSTOP;
-@@ -149,6 +154,7 @@ static void render_line(struct abuf *ab, const char *raw, size_t rawlen,
+@@ -157,6 +163,7 @@ static void render_line(struct abuf *ab, const char *raw, size_t rawlen,
          }
          if (col >= skip + maxc) break;
      }
 +    if (curhl != -1) ab_fg(ab, -1);
      while (col < skip + maxc) {
+         if (col >= skip && padcur) abAppend(ab, "\x1b[7m", 4);
          abAppend(ab, " ", 1);
-         col++;
-@@ -307,8 +313,20 @@ static void render_content(struct abuf *ab) {
+@@ -288,8 +295,20 @@ static void render_content(struct abuf *ab) {
+                         if (p >= ls && p <= le) cc[ncc++] = p - ls;
                      }
                  }
-                 buf_line_slice(&E.buf, li, raw, rawcap);
 +                size_t hllen = 0;
 +                const uint8_t *hline = NULL;
-+                if (hl_active()) {
++                if (hl_active(E.hl)) {
 +                    size_t htotal = 0;
-+                    const uint8_t *hbuf = hl_classes(&htotal);
++                    const uint8_t *hbuf = hl_classes(E.hl, &htotal);
 +                    Line *l = &E.buf.lines[li];
 +                    if (l->start < htotal) {
 +                        hline = hbuf + l->start;
@@ -635,19 +719,288 @@ index 8781edb..3280cd2 100644
 +                    }
 +                }
                  render_line(ab, raw, strlen(raw), (size_t)skip, (size_t)maxc,
--                            q, qlen, hl0, hl1);
-+                            q, qlen, hl0, hl1, hline, hllen);
+-                            q, qlen, hl0, hl1, cc, ncc);
++                            q, qlen, hl0, hl1, cc, ncc, hline, hllen);
              }
              abAppend(ab, "\x1b[0K", 4);
          }
-@@ -463,6 +481,7 @@ int main(int argc, char **argv) {
-     }
-     atexit(term_restore);
-     edit_init();
-+    hl_init(); /* a missing parser just means no colors; edit_open hints how */
-     if (argc > 1) edit_open(argv[1]);
-     E.ed_cols = E.screen_cols;
- 
+diff --git a/queries/c/highlights.scm b/queries/c/highlights.scm
+new file mode 100644
+index 0000000..fd87c72
+--- /dev/null
++++ b/queries/c/highlights.scm
+@@ -0,0 +1,30 @@
++; C highlights (tree-sitter-c).
++(comment) @comment
++
++(string_literal) @string
++(char_literal) @string
++(number_literal) @number
++
++(preproc_include) @preproc
++(preproc_def) @preproc
++(preproc_function_def) @preproc
++(preproc_call directive: (preproc_directive) @preproc)
++(preproc_directive) @preproc
++
++(function_definition declarator: (function_declarator declarator: (identifier) @function))
++(call_expression function: (identifier) @function)
++(type_identifier) @type
++(primitive_type) @type.builtin
++(field_identifier) @field
++(enumerator name: (identifier) @constant)
++(parameter_declaration declarator: (identifier) @parameter)
++(struct_specifier name: (type_identifier) @type)
++(enum_specifier name: (type_identifier) @type)
++(union_specifier name: (type_identifier) @type)
++
++; Keywords (anonymous tokens).
++[
++  "auto" "break" "case" "const" "continue" "default" "do" "else" "enum"
++  "extern" "for" "goto" "if" "inline" "register" "restrict" "return"
++  "sizeof" "static" "struct" "switch" "typedef" "union" "volatile" "while"
++] @keyword
+\ No newline at end of file
+diff --git a/queries/cpp/highlights.scm b/queries/cpp/highlights.scm
+new file mode 100644
+index 0000000..759f510
+--- /dev/null
++++ b/queries/cpp/highlights.scm
+@@ -0,0 +1,41 @@
++; C++ highlights (tree-sitter-cpp).
++(comment) @comment
++
++(string_literal) @string
++(raw_string_literal) @string
++(char_literal) @string
++(number_literal) @number
++
++(preproc_include) @preproc
++(preproc_def) @preproc
++(preproc_function_def) @preproc
++(preproc_call directive: (preproc_directive) @preproc)
++(preproc_directive) @preproc
++
++(function_definition declarator: (function_declarator declarator: (identifier) @function))
++(call_expression function: (identifier) @function)
++(namespace_definition name: (namespace_identifier) @namespace)
++(type_identifier) @type
++(primitive_type) @type.builtin
++(field_identifier) @field
++(enumerator name: (identifier) @constant)
++(parameter_declaration declarator: (identifier) @parameter)
++(template_parameter_list (type_parameter_declaration) @type)
++(struct_specifier name: (type_identifier) @type)
++(class_specifier name: (type_identifier) @type)
++(enum_specifier name: (type_identifier) @type)
++(union_specifier name: (type_identifier) @type)
++(true) @constant.builtin
++(false) @constant.builtin
++"nullptr" @constant.builtin
++
++; Keywords (anonymous tokens).
++[
++  "alignas" "alignof" "asm" "break" "case" "catch" "class" "const"
++  "constexpr" "continue" "decltype" "default" "delete" "do" "else" "enum"
++  "explicit" "export" "extern" "for" "friend" "goto" "if" "inline" "mutable"
++  "namespace" "new" "noexcept" "operator" "private" "protected" "public"
++  "register" "return" "sizeof" "static" "static_assert" "struct" "switch"
++  "template" "throw" "try" "typedef" "typename" "union" "using" "virtual"
++  "volatile" "while"
++] @keyword
+\ No newline at end of file
+diff --git a/queries/java/highlights.scm b/queries/java/highlights.scm
+new file mode 100644
+index 0000000..2306eaf
+--- /dev/null
++++ b/queries/java/highlights.scm
+@@ -0,0 +1,46 @@
++; Java highlights (tree-sitter-java).
++(line_comment) @comment
++(block_comment) @comment
++
++(string_literal) @string
++(character_literal) @string
++(decimal_integer_literal) @number
++(hex_integer_literal) @number
++(octal_integer_literal) @number
++(binary_integer_literal) @number
++(decimal_floating_point_literal) @number
++(hex_floating_point_literal) @number
++
++(class_declaration name: (identifier) @type)
++(interface_declaration name: (identifier) @type)
++(enum_declaration name: (identifier) @type)
++(record_declaration name: (identifier) @type)
++(annotation_type_declaration name: (identifier) @type)
++(method_declaration name: (identifier) @function)
++(constructor_declaration name: (identifier) @function)
++(method_invocation name: (identifier) @function)
++(object_creation_expression type: (type_identifier) @type)
++(type_identifier) @type
++(integral_type) @type.builtin
++(floating_point_type) @type.builtin
++(boolean_type) @type.builtin
++(void_type) @type.builtin
++(field_declaration declarator: (variable_declarator name: (identifier) @field))
++(formal_parameter name: (identifier) @parameter)
++(catch_formal_parameter name: (identifier) @parameter)
++(enum_constant name: (identifier) @constant)
++(annotation name: (identifier) @preproc)
++(true) @constant.builtin
++(false) @constant.builtin
++(null_literal) @constant.builtin
++(this) @constant.builtin
++(super) @constant.builtin
++
++; Keywords (anonymous tokens).
++[
++  "abstract" "assert" "break" "case" "catch" "class" "continue" "default"
++  "do" "else" "enum" "extends" "final" "finally" "for" "if" "implements"
++  "import" "instanceof" "interface" "native" "new" "package" "private"
++  "protected" "public" "return" "static" "strictfp" "switch" "synchronized"
++  "throw" "throws" "transient" "try" "volatile" "while"
++] @keyword
+\ No newline at end of file
+diff --git a/queries/javascript/highlights.scm b/queries/javascript/highlights.scm
+new file mode 100644
+index 0000000..f78fb40
+--- /dev/null
++++ b/queries/javascript/highlights.scm
+@@ -0,0 +1,40 @@
++; JavaScript highlights (tree-sitter-javascript).
++(comment) @comment
++
++(string) @string
++(template_string) @string
++(regex) @string
++(number) @number
++
++(function_declaration name: (identifier) @function)
++(function_expression name: (identifier) @function)
++(method_definition name: (property_identifier) @function)
++(generator_function_declaration name: (identifier) @function)
++(call_expression function: (identifier) @function)
++(call_expression function: (member_expression property: (property_identifier) @function))
++(new_expression constructor: (identifier) @function)
++(arrow_function) @function
++
++(member_expression property: (property_identifier) @field)
++(object (pair key: (property_identifier) @field))
++(variable_declarator name: (identifier) @variable)
++(identifier) @variable
++(this) @constant.builtin
++(super) @constant.builtin
++(true) @constant.builtin
++(false) @constant.builtin
++(null) @constant.builtin
++(undefined) @constant.builtin
++
++(import_statement (import_clause) @namespace)
++(import_specifier name: (identifier) @namespace)
++(export_statement) @preproc
++
++; Keywords (anonymous tokens).
++[
++  "as" "async" "await" "break" "case" "catch" "class" "const" "continue"
++  "debugger" "default" "delete" "do" "else" "export" "extends" "finally"
++  "for" "from" "function" "get" "if" "import" "in" "instanceof" "let"
++  "new" "of" "return" "set" "static" "switch" "throw" "try" "typeof"
++  "var" "void" "while" "with" "yield"
++] @keyword
+\ No newline at end of file
+diff --git a/queries/python/highlights.scm b/queries/python/highlights.scm
+new file mode 100644
+index 0000000..dcb8020
+--- /dev/null
++++ b/queries/python/highlights.scm
+@@ -0,0 +1,35 @@
++; Python highlights (tree-sitter-python).
++(comment) @comment
++
++(string) @string
++(interpolation) @string
++(escape_sequence) @string.escape
++
++(integer) @number
++(float) @number
++
++(function_definition name: (identifier) @function)
++(class_definition name: (identifier) @type)
++(call function: (identifier) @function)
++(attribute attribute: (identifier) @field)
++(type (identifier) @type)
++(parameters (identifier) @parameter)
++(default_parameter name: (identifier) @parameter)
++(typed_parameter (identifier) @parameter)
++(typed_default_parameter name: (identifier) @parameter)
++
++(true) @constant.builtin
++(false) @constant.builtin
++(none) @constant.builtin
++
++(import_statement (dotted_name (identifier) @namespace))
++(import_from_statement (dotted_name (identifier) @namespace))
++(aliased_import alias: (identifier) @namespace)
++
++; Keywords (anonymous tokens).
++[
++  "and" "as" "assert" "async" "await" "break" "case" "class" "continue"
++  "def" "del" "elif" "else" "except" "exec" "finally" "for" "from" "global"
++  "if" "import" "in" "is" "lambda" "match" "nonlocal" "not" "or" "pass"
++  "raise" "return" "try" "while" "with" "yield"
++] @keyword
+\ No newline at end of file
+diff --git a/queries/rust/highlights.scm b/queries/rust/highlights.scm
+new file mode 100644
+index 0000000..40eec81
+--- /dev/null
++++ b/queries/rust/highlights.scm
+@@ -0,0 +1,43 @@
++; Rust highlights (tree-sitter-rust).
++(line_comment) @comment
++(block_comment) @comment
++(attribute_item) @preproc
++(inner_attribute_item) @preproc
++
++(string_literal) @string
++(raw_string_literal) @string
++(char_literal) @string
++(integer_literal) @number
++(float_literal) @number
++
++(macro_invocation macro: (identifier) @macro)
++(macro_definition name: (identifier) @macro)
++
++(function_item name: (identifier) @function)
++(function_signature_item name: (identifier) @function)
++(struct_item name: (type_identifier) @type)
++(enum_item name: (type_identifier) @type)
++(union_item name: (type_identifier) @type)
++(trait_item name: (type_identifier) @type)
++(type_item name: (type_identifier) @type)
++(enum_variant name: (identifier) @type)
++
++(type_identifier) @type
++(primitive_type) @type.builtin
++(field_identifier) @field
++(lifetime) @label
++(mutable_specifier) @keyword
++(crate) @keyword
++(self) @keyword
++(super) @keyword
++
++(scoped_identifier path: (identifier) @namespace)
++(use_declaration (scoped_identifier path: (identifier) @namespace))
++
++; Keywords (anonymous tokens).
++[
++  "as" "async" "await" "break" "const" "continue" "dyn" "else" "enum"
++  "extern" "fn" "for" "if" "impl" "in" "let" "loop" "match" "mod" "move"
++  "pub" "ref" "return" "static" "struct" "trait" "true" "false" "type"
++  "unsafe" "use" "where" "while"
++] @keyword
+\ No newline at end of file
 diff --git a/tree_sitter/api.h b/tree_sitter/api.h
 new file mode 100644
 index 0000000..12055f0

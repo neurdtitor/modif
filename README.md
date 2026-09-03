@@ -20,8 +20,10 @@ and recompile. If you can't read the whole core in an evening, it's too big.
 ## Status
 
 v0 works: gap-buffer editing, modal insert/normal/visual, `:w`/`:q`
-commands, search, fuzzy finder, and an embedded terminal pane. Still rough
-around the edges — no syntax highlighting, no undo tree.
+commands, search, fuzzy finder, an embedded terminal pane, and a system
+clipboard. Features that aren't core — multiple buffers, multiple cursors,
+tree-sitter syntax highlighting — ship as ordered patches (see below). The
+core stays deliberately small.
 
 ## What's here (v0)
 
@@ -39,8 +41,10 @@ around the edges — no syntax highlighting, no undo tree.
   code without leaving the editor
 - **Fuzzy finder**: built-in file picker with subsequence matching and
   fzf-style scoring, launched as a popup
+- **System clipboard**: `pbcopy`/`pbpaste` (macOS) or `wl-copy`/`xclip`/
+  `xsel` elsewhere, bound to `<Space>Y` / `<Space>P`
 - **Patch-friendly layout**: `buffer.c`, `terminal.c`, `input.c`, `pty.c`,
-  `fuzzy.c`, `config.h` — small, single-purpose files
+  `fuzzy.c`, `clipboard.c`, `config.h` — small, single-purpose files
 
 ## Modes
 
@@ -106,6 +110,8 @@ the leader key itself is `LEADER_KEY` (change it to any key, e.g. `\`).
 | `<Space>w`    | switch pane focus               |
 | `<Space>s`    | save                            |
 | `<Space>q`    | quit                            |
+| `<Space>Y`    | copy yank buffer / selection to the system clipboard |
+| `<Space>P`    | paste the system clipboard at the cursor |
 
 A leader followed by an unbound key just cancels the leader; `Esc` also
 cancels it.
@@ -121,10 +127,8 @@ extend the selection (`2j`, `10l`). `Esc` cancels a pending count or operator.
 ## Explicitly out of scope (for now)
 
 - LSP / DAP
-- tree-sitter / real syntax highlighting (maybe simple regex highlighting later)
 - A runtime plugin system or embedded scripting language
-- Undo tree (start with plain linear undo)
-- Multiple cursors
+- Undo tree (undo is a permanent, linear base feature — see `patches/README.md`)
 
 These aren't rejected forever — just not part of v0. Anything here can come
 back as an optional patch later.
@@ -138,6 +142,7 @@ back as an optional patch later.
 | Embedded shell  | `forkpty()` + minimal VT100/ANSI subset (à la `st`)   |
 | Fuzzy matching  | Subsequence match + fzf-style scoring                 |
 | Config          | `config.h`, recompiled — no runtime config language   |
+| Syntax (patch)  | tree-sitter via `dlopen`; colors from `queries/<lang>/highlights.scm` |
 | Extensibility   | Source patches (`.diff`), applied and recompiled      |
 
 ## Prior art / inspiration
@@ -156,13 +161,27 @@ make
 ```
 
 No build system beyond a single Makefile. No package manager, no vendored
-dependencies beyond libc.
+dependencies beyond libc (the optional tree-sitter patch vendors
+`tree_sitter/api.h` for ABI stability but loads the runtime with `dlopen`).
 
 ## Patches
 
 Features live in `patches/<name>.diff`, one feature per file, applied to the
 pristine base (`HEAD`) with `git apply`. The base is never committed with
 patches applied — the suckless model.
+
+The patches are an explicit, ordered chain, each documented as depending on
+the one before it:
+
+    HEAD (pristine base)
+      └─ 01-buffers.diff         multi-buffer + quit-all + buffer fuzzy
+           └─ 02-multicursor.diff     multiple cursors
+                └─ 03-treesitter.diff     tree-sitter syntax highlighting
+
+Two rules keep the set robust: **undo is linear and frozen in the base** (no
+patch ever redefines it), and **each feature owns its state in its own
+file** (`MCState` in `mc.c`, `HLState` in `highlight.c`) — patches add a
+struct pointer to the Editor, never fields.
 
     ./patches/apply.sh && make   # apply all + rebuild (idempotent)
     ./patches/remove.sh <name>   # un-apply one patch

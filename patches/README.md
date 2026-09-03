@@ -6,16 +6,40 @@ patch layers one optional feature on top.
 
 ## Conventions
 
-- One feature per `.diff`, named after it: `01-buffers.diff`, `02-quitall.diff`.
+- One feature per `.diff`, named after it: `01-buffers.diff`, `02-multicursor.diff`.
 - The two-digit prefix fixes the **apply order**: a patch may build on an
-  earlier one (`02-quitall` needs `01-buffers`), so patches must apply in
-  numeric order. `apply.sh` applies them in that order.
+  earlier one, so patches must apply in numeric order. `apply.sh` applies them
+  in that order. The current chain is:
+
+      HEAD (pristine base)
+        └─ 01-buffers.diff       multi-buffer + quit-all + buffer fuzzy
+             └─ 02-multicursor.diff   multiple cursors (builds on 01)
+                  └─ 03-treesitter.diff   tree-sitter syntax highlighting (builds on 01)
+
+  Each patch depends on the one before it: 02 needs 01's `E.bl` buffer list,
+  03 needs 01's per-buffer `hl_dirty()` reset. Do not reorder them.
 - A patch is generated with `git diff HEAD` against a clean tree, so it
   contains exactly one feature and nothing else. Build artifacts (`.o`,
   the binary) are never included.
 - Applied patches are **never committed**: `HEAD` is always the pristine core.
   (Otherwise patches would start overlapping and the whole model breaks.)
 - If the base changes under a patch, regenerate it: remove, edit, re-`mkpatch`.
+
+### Undo is frozen
+
+Undo is **linear, in the base, and never touched by a patch**. The base's
+`cmd_undo`/`cmd_redo` in `edit.c` are the one and only undo model; no patch
+may redefine undo's shape (not per-buffer, not a tree). `01-buffers` resets
+the global undo log on buffer switch, but the model itself stays the base's.
+If a tree/branching undo is ever wanted, it is the one patch allowed to
+rewrite undo — and once merged, nothing else redefines it again.
+
+### One struct per feature
+
+A patch that adds state adds a **struct owned by its own file**, and the
+Editor only holds a pointer to it — it does not bolt fields onto `Editor`.
+`02-multicursor` adds `MCState` in `mc.c`; `03-treesitter` adds `HLState` in
+`highlight.c`. This keeps patches isolated and reviewable.
 
 ## Workflow
 
@@ -26,8 +50,8 @@ patch layers one optional feature on top.
 With no arguments `apply.sh` applies every patch that isn't applied yet,
 in numeric order. To apply just one (or a few), name it:
 
-    ./patches/apply.sh quitall
-    ./patches/apply.sh 06 undotree        # names / unique prefixes
+    ./patches/apply.sh buffers
+    ./patches/apply.sh 02 multicursor        # names / unique prefixes
 
 Idempotent: `apply.sh` records what it has applied in `.patches-applied`
 (gitignored) and skips those on later runs. It removes the `.o` files and the
@@ -40,8 +64,8 @@ longer apply cleanly are reported as conflicts.
     ./patches/remove.sh <name>    # one patch
     ./patches/remove.sh all       # every applied patch (reverse order)
 
-`<name>` is a prefix, so `./patches/remove.sh quitall` or
-`./patches/remove.sh 02-quitall` both work. Removing a patch that others
+`<name>` is a prefix, so `./patches/remove.sh multicursor` or
+`./patches/remove.sh 02-multicursor` both work. Removing a patch that others
 build on breaks those — remove them in reverse order (`all` does this for
 you).
 

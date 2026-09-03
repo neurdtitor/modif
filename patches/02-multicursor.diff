@@ -1,0 +1,572 @@
+diff --git a/Makefile b/Makefile
+index 2f320ce..d4552c9 100644
+--- a/Makefile
++++ b/Makefile
+@@ -2,7 +2,7 @@ CC      ?= cc
+ CFLAGS  ?= -O2 -std=c11 -Wall -Wextra
+ LDLIBS   = $(shell uname -s | grep -q Linux && echo -lutil)
+ 
+-OBJS = main.o buffer.o terminal.o input.o edit.o fuzzy.o pty.o clipboard.o
++OBJS = main.o buffer.o terminal.o input.o edit.o fuzzy.o pty.o clipboard.o mc.o
+ 
+ modif: $(OBJS)
+ 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDLIBS)
+diff --git a/config.h b/config.h
+index 5803f1b..57732a4 100644
+--- a/config.h
++++ b/config.h
+@@ -30,6 +30,9 @@ static const KeyBind leader_keys[] = {
+     { 'q', cmd_quit },
+     { 'Y', cmd_clip_copy },
+     { 'P', cmd_clip_paste },
++    { 'c', cmd_mc_add_next },
++    { 'C', cmd_mc_add_all },
++    { 'x', cmd_mc_exit },
+ };
+ 
+ /* Normal-mode bindings. */
+diff --git a/edit.c b/edit.c
+index 865fb82..d482f66 100644
+--- a/edit.c
++++ b/edit.c
+@@ -8,6 +8,7 @@
+ #include "config.h"
+ #include "fuzzy.h"
+ #include "clipboard.h"
++#include "mc.h"
+ 
+ Editor E;
+ int g_quit = 0;
+@@ -110,13 +111,32 @@ static void ed_del_range(size_t pos, size_t n) {
+     E.dirty = 1;
+ }
+ 
++/* Raw edit primitives exported to mc.c: apply an edit and record it in the
++ * undo log, without touching the cursor (the multi-cursor feature moves its
++ * own cursors around these). */
++void ed_apply_insert(size_t pos, const char *s, size_t n) {
++    if (!n) return;
++    rec_insert(pos, s, n);
++    buf_insert(&E.buf, pos, s, n);
++    E.dirty = 1;
++}
++
++void ed_apply_delete(size_t pos, const char *s, size_t n) {
++    if (!n) return;
++    rec_delete(pos, s, n);
++    buf_delete(&E.buf, pos, n);
++    E.dirty = 1;
++}
++
+ static void ed_backspace(void) {
++    if (mc_active()) { mc_backspace(); return; }
+     if (E.cur == 0) return;
+     ed_del_range(E.cur - 1, 1);
+     E.cur--;
+ }
+ 
+ static void ed_delchar(void) {
++    if (mc_active()) { mc_delchar(); return; }
+     size_t len = gb_len(&E.buf.gb);
+     if (E.cur >= len) return;
+     ed_del_range(E.cur, 1);
+@@ -277,12 +297,18 @@ void cmd_page_up(void) { jump_lines(-(long)(E.screen_rows - 2)); }
+ 
+ void cmd_enter_insert(void) { E.mode = MODE_INSERT; }
+ void cmd_append(void) {
++    if (mc_active()) { mc_append(); E.mode = MODE_INSERT; return; }
+     Line *l = &E.buf.lines[cur_line()];
+     if (E.cur < l->start + l->len) E.cur++;
+     E.mode = MODE_INSERT;
+ }
+-void cmd_insert_bol(void) { E.cur = E.buf.lines[cur_line()].start; E.mode = MODE_INSERT; }
++void cmd_insert_bol(void) {
++    if (mc_active()) { mc_bol(); E.mode = MODE_INSERT; return; }
++    E.cur = E.buf.lines[cur_line()].start;
++    E.mode = MODE_INSERT;
++}
+ void cmd_append_eol(void) {
++    if (mc_active()) { mc_eol(); E.mode = MODE_INSERT; return; }
+     Line *l = &E.buf.lines[cur_line()];
+     E.cur = l->start + l->len;
+     E.mode = MODE_INSERT;
+@@ -980,7 +1006,7 @@ void edit_handle_key(int key) {
+     /* normal mode */
+     if (leader_handle(key)) return;
+     if (key == LEADER_KEY) { leader = 1; count_reset(); return; }
+-    if (key == ESC) { count_reset(); return; }
++    if (key == ESC) { count_reset(); if (mc_active()) { cmd_mc_exit(); } return; }
+     if (key >= '1' && key <= '9') {
+         ncount = ncount * 10 + (size_t)(key - '0');
+         if (ncount > 1000000) ncount = 1000000;
+@@ -992,6 +1018,13 @@ void edit_handle_key(int key) {
+         if (normal_keys[i].key == key) { fn = normal_keys[i].fn; break; }
+     if (!fn) { count_reset(); return; }
+ 
++    /* in multi-cursor mode, motions sweep every cursor at once */
++    if (mc_active() && !op && is_motion(fn)) {
++        size_t c = count_take();
++        mc_sweep(fn, c);
++        return;
++    }
++
+     if (op && is_motion(fn)) { do_motion_op(fn); return; }
+     if (op && fn == cmd_delete_line && op == OP_DELETE) { do_line_op(OP_DELETE); return; }
+     if (op && fn == cmd_yank_line && op == OP_YANK) { do_line_op(OP_YANK); return; }
+@@ -1006,6 +1039,8 @@ void edit_handle_key(int key) {
+             if (li >= E.buf.nlines) li = E.buf.nlines - 1;
+             E.cur = E.buf.lines[li].start;
+             count_reset();
++        } else if (mc_active()) {
++            mc_sweep(fn, 1);
+         } else {
+             fn();
+         }
+@@ -1023,6 +1058,7 @@ void edit_handle_key(int key) {
+ void edit_after(void) {
+     size_t len = gb_len(&E.buf.gb);
+     if (E.cur > len) E.cur = len;
++    if (mc_active()) mc_clamp(len);
+     size_t content_rows = E.screen_rows > 1 ? (size_t)(E.screen_rows - 1) : 1;
+     size_t li = cur_line();
+     if (li < E.top) E.top = li;
+@@ -1079,12 +1115,17 @@ void edit_status(void) {
+     const char *m = E.mode == MODE_INSERT ? "INSERT"
+                    : E.mode == MODE_VISUAL ? "VISUAL" : "NORMAL";
+     const char *fname = E.buf.name ? E.buf.name : "[no file]";
++    char extra[64] = "";
++    if (mc_active())
++        snprintf(extra, sizeof extra, "  %zu cursors", mc_count());
++    if (E.focus == FOCUS_TERM)
++        snprintf(extra + strlen(extra), sizeof extra - strlen(extra), "  [TERM]");
+     snprintf(E.status, sizeof E.status,
+              "modif %s  %s  [%s]  %zu/%zu  %zu:%zu/%zu%s%s",
+              MODIF_VERSION, fname, m, E.bl->cur + 1, E.bl->n, li + 1, col + 1,
+              E.buf.nlines,
+              E.dirty ? "  *modified*" : "",
+-             E.focus == FOCUS_TERM ? "  [TERM]" : "");
++             extra);
+ }
+ 
+ void edit_set_status(const char *fmt, ...) {
+@@ -1098,6 +1139,7 @@ void edit_set_status(const char *fmt, ...) {
+ void edit_init(void) {
+     E.bl = malloc(sizeof(BufList));
+     bl_init(E.bl);
++    mc_init();
+     buf_init(&E.buf);
+     buf_build_lines(&E.buf); /* always at least one empty line */
+     buf_add(&E.buf);
+diff --git a/edit.h b/edit.h
+index 8749cf3..3793650 100644
+--- a/edit.h
++++ b/edit.h
+@@ -4,6 +4,7 @@
+ #include <stddef.h>
+ #include <time.h>
+ #include "buffer.h"
++#include "mc.h"
+ 
+ typedef void (*cmd_fn)(void);
+ typedef struct { int key; cmd_fn fn; } KeyBind;
+@@ -46,6 +47,7 @@ typedef struct {
+     size_t fqlen;
+     int fsel;
+     int fbuf;         /* 1 = fuzzy matching open buffers, 0 = files */
++    MCState *mc;      /* multi-cursor state (mc.c owns the struct) */
+ } Editor;
+ 
+ extern Editor E;
+@@ -95,6 +97,9 @@ void cmd_fuzzy(void);
+ void cmd_buf_prev(void);
+ void cmd_buf_next(void);
+ void cmd_buf_fuzzy(void);
++void cmd_mc_add_next(void);
++void cmd_mc_add_all(void);
++void cmd_mc_exit(void);
+ void cmd_toggle_term(void);
+ void cmd_switch_focus(void);
+ 
+diff --git a/main.c b/main.c
+index f504a77..7e6792d 100644
+--- a/main.c
++++ b/main.c
+@@ -9,6 +9,7 @@
+ #include "edit.h"
+ #include "config.h"
+ #include "pty.h"
++#include "mc.h"
+ 
+ /* ------------------------------- append buffer ---------------------------- */
+ 
+@@ -112,11 +113,12 @@ static void ab_bg(struct abuf *ab, int idx) {
+ }
+ 
+ /* Render a line's visible window [skip, skip+maxc), expanding tabs and
+- * highlighting occurrences of q and the selection range hl0..hl1
+- * (raw char indices within the line) in reverse video. */
++ * highlighting occurrences of q, the selection range hl0..hl1 and any
++ * multi-cursor positions in cc[0..ncc) (raw char indices within the line) in
++ * reverse video. */
+ static void render_line(struct abuf *ab, const char *raw, size_t rawlen,
+                         size_t skip, size_t maxc, const char *q, size_t qlen,
+-                        size_t hl0, size_t hl1) {
++                        size_t hl0, size_t hl1, const size_t *cc, size_t ncc) {
+     size_t col = 0;
+     size_t mstart[32];
+     size_t nm = 0;
+@@ -125,32 +127,40 @@ static void render_line(struct abuf *ab, const char *raw, size_t rawlen,
+             if (!memcmp(raw + i, q, qlen)) mstart[nm++] = i;
+     }
+     size_t mi = 0;
++    int padcur = 0;
++    for (size_t k = 0; k < ncc; k++)
++        if (cc[k] == rawlen) padcur = 1;
+     for (size_t i = 0; i < rawlen; i++) {
+         if (nm && mi < nm && i == mstart[mi] + qlen) mi++;
+         int inm = (nm && mi < nm && i >= mstart[mi]) || (i >= hl0 && i < hl1);
++        int iscur = 0;
++        for (size_t k = 0; k < ncc && !iscur; k++)
++            if (cc[k] == i) iscur = 1;
+         char c = raw[i];
+         if (c == '\t') {
+             size_t stop = (col / MODIF_TABSTOP + 1) * MODIF_TABSTOP;
+             while (col < stop) {
+                 if (col >= skip && col < skip + maxc) {
+-                    if (inm) abAppend(ab, "\x1b[7m", 4);
++                    if (inm || iscur) abAppend(ab, "\x1b[7m", 4);
+                     abAppend(ab, " ", 1);
+-                    if (inm) abAppend(ab, "\x1b[27m", 5);
++                    if (inm || iscur) abAppend(ab, "\x1b[27m", 5);
+                 }
+                 col++;
+             }
+         } else {
+             if (col >= skip && col < skip + maxc) {
+-                if (inm) abAppend(ab, "\x1b[7m", 4);
++                if (inm || iscur) abAppend(ab, "\x1b[7m", 4);
+                 abAppend(ab, &c, 1);
+-                if (inm) abAppend(ab, "\x1b[27m", 5);
++                if (inm || iscur) abAppend(ab, "\x1b[27m", 5);
+             }
+             col++;
+         }
+         if (col >= skip + maxc) break;
+     }
+     while (col < skip + maxc) {
++        if (col >= skip && padcur) abAppend(ab, "\x1b[7m", 4);
+         abAppend(ab, " ", 1);
++        if (col >= skip && padcur) abAppend(ab, "\x1b[27m", 5);
+         col++;
+     }
+ }
+@@ -269,8 +279,17 @@ static void render_content(struct abuf *ab) {
+                     }
+                 }
+                 buf_line_slice(&E.buf, li, raw, rawcap);
++                size_t cc[64], ncc = 0;
++                if (mc_active()) {
++                    Line *l = &E.buf.lines[li];
++                    size_t ls = l->start, le = l->start + l->len;
++                    for (size_t ci = 0; ci < E.mc->n && ncc < 64; ci++) {
++                        size_t p = E.mc->cur[ci];
++                        if (p >= ls && p <= le) cc[ncc++] = p - ls;
++                    }
++                }
+                 render_line(ab, raw, strlen(raw), (size_t)skip, (size_t)maxc,
+-                            q, qlen, hl0, hl1);
++                            q, qlen, hl0, hl1, cc, ncc);
+             }
+             abAppend(ab, "\x1b[0K", 4);
+         }
+diff --git a/mc.c b/mc.c
+new file mode 100644
+index 0000000..cd7e627
+--- /dev/null
++++ b/mc.c
+@@ -0,0 +1,231 @@
++#include <ctype.h>
++#include <stdlib.h>
++#include <string.h>
++#include "edit.h"
++#include "mc.h"
++
++/* ----------------------------- multiple cursors ---------------------------- */
++
++/* <space>c enables multi-cursor mode with a cursor at the current position
++ * (the word under it is remembered); pressing it again adds the next
++ * occurrence of that word, <space>C adds every occurrence at once, and
++ * <space>x / Esc leaves. While active, motions move all cursors and edits
++ * apply at every cursor. Undo records each cursor's edit separately, so `u`
++ * removes them one at a time. */
++
++extern Editor E;
++
++/* Raw insert/delete primitives, exported by edit.c so mc.c applies each
++ * cursor's edit through the same undo-log path as normal editing. */
++void ed_apply_insert(size_t pos, const char *s, size_t n);
++void ed_apply_delete(size_t pos, const char *s, size_t n);
++
++void mc_init(void) {
++    E.mc = calloc(1, sizeof(MCState));
++}
++
++int mc_active(void) { return E.mc && E.mc->active; }
++
++static void mc_exit(void) {
++    free(E.mc->cur);
++    E.mc->cur = NULL;
++    E.mc->n = E.mc->cap = 0;
++    E.mc->active = 0;
++    E.mc->primary = 0;
++    E.mc->wlen = 0;
++}
++
++/* Sort mc_order[] so cursors are visited in descending buffer position, which
++ * keeps earlier positions valid while inserting/deleting. */
++static size_t *mc_order;
++static size_t mc_order_cap;
++
++static void mc_order_by_pos(void) {
++    if (mc_order_cap < E.mc->n) {
++        mc_order_cap = E.mc->n;
++        mc_order = realloc(mc_order, mc_order_cap * sizeof(size_t));
++    }
++    for (size_t i = 0; i < E.mc->n; i++) mc_order[i] = i;
++    for (size_t i = 1; i < E.mc->n; i++) {
++        size_t v = mc_order[i], j = i;
++        while (j > 0 && E.mc->cur[mc_order[j - 1]] < E.mc->cur[v]) {
++            mc_order[j] = mc_order[j - 1];
++            j--;
++        }
++        mc_order[j] = v;
++    }
++}
++
++void mc_insert(const char *s, size_t n) {
++    if (!n || !E.mc) return;
++    mc_order_by_pos();
++    for (size_t i = 0; i < E.mc->n; i++) {
++        size_t k = mc_order[i];
++        size_t p = E.mc->cur[k];
++        ed_apply_insert(p, s, n);
++        E.mc->cur[k] = p + n;
++        /* edits below a cursor shift it forward; edits above leave it alone */
++        for (size_t j = 0; j < E.mc->n; j++)
++            if (j != k && E.mc->cur[j] > p) E.mc->cur[j] += n;
++    }
++    E.cur = E.mc->cur[E.mc->primary];
++    E.dirty = 1;
++}
++
++/* Delete [p - before, p - before + n) at each cursor. */
++void mc_delete_impl(size_t before, size_t n) {
++    if (!E.mc) return;
++    mc_order_by_pos();
++    size_t blen = gb_len(&E.buf.gb);
++    for (size_t i = 0; i < E.mc->n; i++) {
++        size_t k = mc_order[i];
++        size_t p = E.mc->cur[k];
++        if (p < before) continue;
++        size_t s = p - before;
++        if (s >= blen) continue;
++        size_t e = s + n;
++        if (e > blen) e = blen;
++        if (e <= s) continue;
++        char *sl = gb_slice(&E.buf.gb, s, e - s);
++        ed_apply_delete(s, sl, e - s);
++        free(sl);
++        E.mc->cur[k] = s;
++        for (size_t j = 0; j < E.mc->n; j++) {
++            if (j == k) continue;
++            if (E.mc->cur[j] >= e) E.mc->cur[j] -= (e - s);
++            else if (E.mc->cur[j] > s) E.mc->cur[j] = s;
++        }
++    }
++    E.cur = E.mc->cur[E.mc->primary];
++    E.dirty = 1;
++}
++
++void mc_backspace(void) { mc_delete_impl(1, 1); }
++void mc_delchar(void) { mc_delete_impl(0, 1); }
++
++void mc_append(void) {
++    for (size_t i = 0; i < E.mc->n; i++) {
++        size_t p = E.mc->cur[i];
++        size_t li = buf_line_of(&E.buf, p);
++        if (p < E.buf.lines[li].start + E.buf.lines[li].len) E.mc->cur[i]++;
++    }
++    E.cur = E.mc->cur[E.mc->primary];
++}
++
++void mc_bol(void) {
++    for (size_t i = 0; i < E.mc->n; i++) {
++        size_t li = buf_line_of(&E.buf, E.mc->cur[i]);
++        E.mc->cur[i] = E.buf.lines[li].start;
++    }
++    E.cur = E.mc->cur[E.mc->primary];
++}
++
++void mc_eol(void) {
++    for (size_t i = 0; i < E.mc->n; i++) {
++        size_t li = buf_line_of(&E.buf, E.mc->cur[i]);
++        E.mc->cur[i] = E.buf.lines[li].start + E.buf.lines[li].len;
++    }
++    E.cur = E.mc->cur[E.mc->primary];
++}
++
++void mc_sweep(void (*fn)(void), size_t count) {
++    for (size_t i = 0; i < E.mc->n; i++) {
++        E.cur = E.mc->cur[i];
++        for (size_t j = 0; j < count; j++) fn();
++        E.mc->cur[i] = E.cur;
++    }
++    E.cur = E.mc->cur[E.mc->primary];
++}
++
++void mc_clamp(size_t len) {
++    if (!E.mc) return;
++    for (size_t i = 0; i < E.mc->n; i++)
++        if (E.mc->cur[i] > len) E.mc->cur[i] = len;
++}
++
++size_t mc_count(void) { return E.mc ? E.mc->n : 0; }
++
++/* Copy the word at the primary cursor into E.mc->word. */
++static void mc_grab_word(void) {
++    size_t len = gb_len(&E.buf.gb);
++    size_t i = E.cur, s;
++    while (i < len) {
++        char c = gb_at(&E.buf.gb, i);
++        if (isalnum((unsigned char)c) || c == '_') break;
++        i++;
++    }
++    s = i;
++    while (i < len) {
++        char c = gb_at(&E.buf.gb, i);
++        if (!isalnum((unsigned char)c) && c != '_') break;
++        i++;
++    }
++    E.mc->wlen = i - s;
++    if (E.mc->wlen > sizeof E.mc->word - 1) E.mc->wlen = sizeof E.mc->word - 1;
++    for (size_t j = 0; j < E.mc->wlen; j++) E.mc->word[j] = gb_at(&E.buf.gb, s + j);
++    E.mc->word[E.mc->wlen] = '\0';
++}
++
++static void mc_enable(void) {
++    E.mc->cur = malloc(sizeof(size_t));
++    E.mc->cur[0] = E.cur;
++    E.mc->n = 1;
++    E.mc->cap = 1;
++    E.mc->active = 1;
++    E.mc->primary = 0;
++    mc_grab_word();
++    edit_set_status("multi-cursor: 1  (<space>c = add next, <space>C = all, <space>x = done)");
++}
++
++/* Add a cursor if it is not already present; makes it the primary. */
++static int mc_add(size_t pos) {
++    for (size_t i = 0; i < E.mc->n; i++)
++        if (E.mc->cur[i] == pos) return 0;
++    if (E.mc->n == E.mc->cap) {
++        E.mc->cap = E.mc->cap ? E.mc->cap * 2 : 8;
++        E.mc->cur = realloc(E.mc->cur, E.mc->cap * sizeof(size_t));
++    }
++    E.mc->cur[E.mc->n++] = pos;
++    E.mc->primary = E.mc->n - 1;
++    E.cur = pos;
++    return 1;
++}
++
++void cmd_mc_add_next(void) {
++    if (!E.mc) return;
++    if (!E.mc->active) { mc_enable(); return; }
++    if (!E.mc->wlen) { edit_set_status("no word under cursor"); return; }
++    size_t maxpos = 0;
++    for (size_t i = 0; i < E.mc->n; i++)
++        if (E.mc->cur[i] > maxpos) maxpos = E.mc->cur[i];
++    size_t len = gb_len(&E.buf.gb);
++    size_t hit = (size_t)-1;
++    if (maxpos + E.mc->wlen <= len)
++        hit = gb_find(&E.buf.gb, E.mc->word, E.mc->wlen, maxpos + E.mc->wlen);
++    if (hit == (size_t)-1)
++        hit = gb_find(&E.buf.gb, E.mc->word, E.mc->wlen, 0);
++    if (hit == (size_t)-1) { edit_set_status("no more matches"); return; }
++    mc_add(hit);
++    edit_set_status("multi-cursor: %zu  (<space>c = add next, <space>C = all, <space>x = done)", E.mc->n);
++}
++
++void cmd_mc_add_all(void) {
++    if (!E.mc) return;
++    if (!E.mc->active) mc_enable();
++    if (!E.mc->wlen) { edit_set_status("no word under cursor"); return; }
++    size_t len = gb_len(&E.buf.gb);
++    size_t from = 0, added = 0;
++    while (from <= len) {
++        size_t hit = gb_find(&E.buf.gb, E.mc->word, E.mc->wlen, from);
++        if (hit == (size_t)-1) break;
++        if (mc_add(hit)) added++;
++        from = hit + E.mc->wlen;
++    }
++    edit_set_status("multi-cursor: %zu cursor(s) (%zu added)", E.mc->n, added);
++}
++
++void cmd_mc_exit(void) {
++    if (!E.mc || !E.mc->active) return;
++    mc_exit();
++    edit_set_status("multi-cursor off");
++}
+\ No newline at end of file
+diff --git a/mc.h b/mc.h
+new file mode 100644
+index 0000000..ce07c03
+--- /dev/null
++++ b/mc.h
+@@ -0,0 +1,46 @@
++#ifndef MODIF_MC_H
++#define MODIF_MC_H
++
++#include <stddef.h>
++
++/* Multi-cursor state, owned entirely by mc.c. Editor holds an MCState* so no
++ * other file needs to know its internals. */
++typedef struct {
++    size_t *cur;    /* one buffer position per cursor */
++    size_t n;       /* number of cursors */
++    size_t cap;     /* allocated capacity of cur[] */
++    int active;     /* 1 while multi-cursor editing is on */
++    size_t primary; /* index of the primary cursor */
++    char word[64];  /* word remembered when enabling, for <space>c/C */
++    size_t wlen;
++} MCState;
++
++/* Allocate and initialise E.mc. Call once at startup. */
++void mc_init(void);
++
++/* 1 while multi-cursor editing is on. */
++int mc_active(void);
++
++/* Editing hooks called from edit.c: apply one edit at every cursor. */
++void mc_insert(const char *s, size_t n);
++void mc_backspace(void);
++void mc_delchar(void);
++void mc_append(void);
++void mc_bol(void);
++void mc_eol(void);
++
++/* Move every cursor with a motion (run fn count times per cursor). */
++void mc_sweep(void (*fn)(void), size_t count);
++
++/* Clamp every cursor into [0, len] after edits. */
++void mc_clamp(size_t len);
++
++/* Number of active cursors (for the status line). */
++size_t mc_count(void);
++
++/* <space>c / <space>C / <space>x */
++void cmd_mc_add_next(void);
++void cmd_mc_add_all(void);
++void cmd_mc_exit(void);
++
++#endif
+\ No newline at end of file

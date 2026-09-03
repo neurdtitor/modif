@@ -39,7 +39,7 @@ int pty_open(Pty *p, int rows, int cols) {
     }
     p->rows = rows;
     p->cols = cols;
-    p->cells = calloc((size_t)rows * cols, sizeof(Cell));
+    p->cells = calloc((size_t)rows * (size_t)cols, sizeof(Cell));
     p->cx = 0;
     p->cy = 0;
     p->scroll_top = 0;
@@ -73,11 +73,12 @@ void pty_close(Pty *p) {
 void pty_resize(Pty *p, int rows, int cols) {
     if (rows < 1) rows = 1;
     if (cols < 1) cols = 1;
-    Cell *nc = calloc((size_t)rows * cols, sizeof(Cell));
+    Cell *nc = calloc((size_t)rows * (size_t)cols, sizeof(Cell));
     int cr = rows < p->rows ? rows : p->rows;
     int cc = cols < p->cols ? cols : p->cols;
     for (int r = 0; r < cr; r++)
-        memcpy(nc + (size_t)r * cols, p->cells + (size_t)r * p->cols,
+        memcpy(nc + (size_t)r * (size_t)cols,
+               p->cells + (size_t)r * (size_t)p->cols,
                (size_t)cc * sizeof(Cell));
     free(p->cells);
     p->cells = nc;
@@ -106,7 +107,7 @@ void pty_write(Pty *p, const char *data, size_t n) {
 /* --------------------------- minimal VT100 parser -------------------------- */
 
 static void cell_clear(Pty *p, int r, int c) {
-    Cell *x = &p->cells[(size_t)r * p->cols + c];
+    Cell *x = &p->cells[(size_t)r * (size_t)p->cols + (size_t)c];
     x->ch = ' ';
     x->fg = -1;
     x->bg = -1;
@@ -145,7 +146,7 @@ static void term_put(Pty *p, unsigned char c) {
         term_index(p);
     }
     if (p->cy < 0 || p->cy >= p->rows) return;
-    Cell *x = &p->cells[(size_t)p->cy * p->cols + p->cx];
+    Cell *x = &p->cells[(size_t)p->cy * (size_t)p->cols + (size_t)p->cx];
     x->ch = c;
     x->fg = p->fg;
     x->bg = p->bg;

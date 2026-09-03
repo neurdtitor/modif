@@ -68,7 +68,7 @@ int kb_decode(const char *buf, size_t len, int *consumed) {
         return r;
     }
     if (buf[1] == 'O') {
-        if (len < 3) { *consumed = 2; return 0; } /* partial ESC O ... */
+        if (len < 3) { *consumed = 1; return ESC; } /* partial: emit ESC, 'O' next */
         *consumed = 3;
         switch (buf[2]) {
         case 'A': return ARROW_UP;
@@ -80,8 +80,12 @@ int kb_decode(const char *buf, size_t len, int *consumed) {
         default: return 0;
         }
     }
-    *consumed = 2;
-    return (unsigned char)buf[1];
+    /* ESC followed by any other byte: emit ESC alone so the following key is
+     * decoded on the next pass. In a modal editor ESC must be reliable — ESC
+     * then 'j' typed quickly must exit insert mode, not become Alt-j. When
+     * forwarded to a shell, ESC+char is byte-identical to Alt+char anyway. */
+    *consumed = 1;
+    return ESC;
 }
 
 void kb_to_bytes(int key, char *out, size_t *outlen) {

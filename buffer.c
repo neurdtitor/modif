@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include "buffer.h"
 
 #define GB_MIN_CAP 512
@@ -30,7 +31,10 @@ char gb_at(GapBuf *g, size_t pos) {
 }
 
 static void gb_grow(GapBuf *g, size_t need) {
-    if (g->cap - (g->gap_end - g->gap_start) >= need) return;
+    /* Grow when the gap itself can't hold `need` bytes, not when the content
+     * is small: a collapsed gap (gap_start == gap_end) must be re-created even
+     * in a buffer whose content is far smaller than `need`. */
+    if (g->gap_end - g->gap_start >= need) return;
     size_t len = gb_len(g);
     size_t ncap = g->cap ? g->cap * 2 : GB_MIN_CAP;
     while (ncap - len < need) ncap *= 2;
@@ -95,7 +99,8 @@ size_t gb_find(GapBuf *g, const char *needle, size_t n, size_t from) {
 
 size_t gb_rfind(GapBuf *g, const char *needle, size_t n, size_t before) {
     size_t len = gb_len(g);
-    if (!n || before > len || n > len) return (size_t)-1;
+    if (!n || n > len) return (size_t)-1;
+    if (before > len) before = len;
     for (long s = (long)(len - n); s >= 0; s--) {
         if ((size_t)s >= before) continue;
         size_t j;
@@ -121,6 +126,8 @@ void buf_init(Buffer *b) {
     b->nlines = 0;
     b->lcap = 0;
     b->name = NULL;
+    b->cur = b->top = b->left = b->mark = 0;
+    b->dirty = 0;
 }
 
 void buf_free(Buffer *b) {
@@ -164,10 +171,15 @@ int buf_open(Buffer *b, const char *path) {
         }
         return -1;
     }
-    off_t sz = lseek(fd, 0, SEEK_END);
-    lseek(fd, 0, SEEK_SET);
+    struct stat st;
+    if (fstat(fd, &st) == -1 || S_ISDIR(st.st_mode)) {
+        close(fd);
+        return -1;
+    }
+    off_t sz = st.st_size;
     if (sz > 0) {
         char *tmp = malloc((size_t)sz);
+        if (!tmp) { close(fd); return -1; }
         size_t got = 0;
         ssize_t r;
         while (got < (size_t)sz && (r = read(fd, tmp + got, (size_t)sz - got)) > 0)
@@ -236,6 +248,7 @@ void buf_delete(Buffer *b, size_t pos, size_t n) {
 }
 
 size_t buf_line_of(Buffer *b, size_t pos) {
+    if (!b->nlines) return 0; /* defensive: buffer without a built line table */
     size_t lo = 0, hi = b->nlines - 1;
     while (lo < hi) {
         size_t mid = (lo + hi + 1) / 2;
@@ -250,4 +263,43 @@ void buf_line_slice(Buffer *b, size_t li, char *out, size_t cap) {
     size_t n = l->len < cap - 1 ? l->len : cap - 1;
     for (size_t i = 0; i < n; i++) out[i] = gb_at(&b->gb, l->start + i);
     out[n] = '\0';
+}
+
+/* ------------------------------- buffer list ------------------------------ */
+
+void bl_init(BufList *bl) {
+    bl->bufs = NULL;
+    bl->n = 0;
+    bl->cur = 0;
+    bl->cap = 0;
+}
+
+void bl_free(BufList *bl) {
+    for (size_t i = 0; i < bl->n; i++) buf_free(&bl->bufs[i]);
+    free(bl->bufs);
+    bl_init(bl);
+}
+
+Buffer *bl_add(BufList *bl, Buffer *nb) {
+    if (bl->n == bl->cap) {
+        bl->cap = bl->cap ? bl->cap * 2 : 4;
+        bl->bufs = realloc(bl->bufs, bl->cap * sizeof(Buffer));
+    }
+    bl->bufs[bl->n] = *nb; /* shallow copy: shares nb's storage */
+    bl->cur = bl->n++;
+    return &bl->bufs[bl->cur];
+}
+
+void bl_remove(BufList *bl, size_t idx) {
+    buf_free(&bl->bufs[idx]);
+    memmove(&bl->bufs[idx], &bl->bufs[idx + 1],
+            (bl->n - idx - 1) * sizeof(Buffer));
+    bl->n--;
+    if (idx < bl->cur) bl->cur--;
+    if (bl->cur >= bl->n) bl->cur = bl->n ? bl->n - 1 : 0;
+}
+
+void bl_switch(BufList *bl, long dir) {
+    if (bl->n < 2) return;
+    bl->cur = (size_t)(((long)bl->cur + dir + (long)bl->n) % (long)bl->n);
 }

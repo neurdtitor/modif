@@ -55,8 +55,8 @@ static int skip_dir(const char *n) {
            !strcmp(n, "build") || !strcmp(n, "dist");
 }
 
-static void walk(Editor *E, const char *dir, int depth) {
-    if (E->fn >= MAX_FILES) return;
+static void walk(Editor *ed, const char *dir, int depth) {
+    if (ed->fn >= MAX_FILES) return;
     DIR *d = opendir(dir);
     if (!d) return;
     struct dirent *de;
@@ -70,24 +70,24 @@ static void walk(Editor *E, const char *dir, int depth) {
         struct stat st;
         if (stat(path, &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) {
-            if (depth < MAX_DEPTH) walk(E, path, depth + 1);
+            if (depth < MAX_DEPTH) walk(ed, path, depth + 1);
         } else if (S_ISREG(st.st_mode)) {
-            if (E->fn == E->fcap) {
-                E->fcap = E->fcap ? E->fcap * 2 : 1024;
-                E->flist = realloc(E->flist, E->fcap * sizeof(char *));
+            if (ed->fn == ed->fcap) {
+                ed->fcap = ed->fcap ? ed->fcap * 2 : 1024;
+                ed->flist = realloc(ed->flist, ed->fcap * sizeof(char *));
             }
             const char *show = (path[0] == '.' && path[1] == '/') ? path + 2 : path;
-            E->flist[E->fn++] = strdup(show);
+            ed->flist[ed->fn++] = strdup(show);
         }
     }
     closedir(d);
 }
 
-void fuzzy_build(Editor *E) {
-    fuzzy_free(E);
-    walk(E, ".", 0);
-    E->fscore = malloc(E->fn * sizeof(int));
-    E->fidx = malloc(E->fn * sizeof(size_t));
+void fuzzy_build(Editor *ed) {
+    fuzzy_free(ed);
+    walk(ed, ".", 0);
+    ed->fscore = malloc(ed->fn * sizeof(int));
+    ed->fidx = malloc(ed->fn * sizeof(size_t));
 }
 
 static int *g_sc;
@@ -99,38 +99,38 @@ static int cmp_fidx(const void *a, const void *b) {
     return ia < ib ? -1 : ia > ib ? 1 : 0;
 }
 
-void fuzzy_filter(Editor *E) {
+void fuzzy_filter(Editor *ed) {
     size_t n = 0;
-    if (E->fqlen) {
-        for (size_t i = 0; i < E->fn; i++) {
+    if (ed->fqlen) {
+        for (size_t i = 0; i < ed->fn; i++) {
             int sc;
-            if (fuzzy_match(E->fq, E->flist[i], &sc)) {
-                E->fscore[i] = sc;
-                E->fidx[n++] = i;
+            if (fuzzy_match(ed->fq, ed->flist[i], &sc)) {
+                ed->fscore[i] = sc;
+                ed->fidx[n++] = i;
             }
         }
         if (n > 1) {
-            g_sc = E->fscore;
-            qsort(E->fidx, n, sizeof(size_t), cmp_fidx);
+            g_sc = ed->fscore;
+            qsort(ed->fidx, n, sizeof(size_t), cmp_fidx);
         }
     } else {
-        for (size_t i = 0; i < E->fn; i++) E->fidx[i] = i;
-        n = E->fn;
+        for (size_t i = 0; i < ed->fn; i++) ed->fidx[i] = i;
+        n = ed->fn;
     }
-    E->fcount = n;
-    if (E->fsel >= (int)n) E->fsel = n > 0 ? (int)n - 1 : 0;
+    ed->fcount = n;
+    if (ed->fsel >= (int)n) ed->fsel = n > 0 ? (int)n - 1 : 0;
 }
 
-void fuzzy_free(Editor *E) {
-    for (size_t i = 0; i < E->fn; i++) free(E->flist[i]);
-    free(E->flist);
-    free(E->fscore);
-    free(E->fidx);
-    E->flist = NULL;
-    E->fn = 0;
-    E->fcap = 0;
-    E->fscore = NULL;
-    E->fidx = NULL;
-    E->fcount = 0;
-    E->fsel = 0;
+void fuzzy_free(Editor *ed) {
+    for (size_t i = 0; i < ed->fn; i++) free(ed->flist[i]);
+    free(ed->flist);
+    free(ed->fscore);
+    free(ed->fidx);
+    ed->flist = NULL;
+    ed->fn = 0;
+    ed->fcap = 0;
+    ed->fscore = NULL;
+    ed->fidx = NULL;
+    ed->fcount = 0;
+    ed->fsel = 0;
 }

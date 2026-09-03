@@ -12,7 +12,8 @@ enum { MODE_NORMAL = 0, MODE_INSERT, MODE_SEARCH, MODE_FUZZY, MODE_VISUAL, MODE_
 enum { FOCUS_EDIT = 0, FOCUS_TERM };
 
 typedef struct {
-    Buffer buf;
+    Buffer buf;      /* active buffer; shares storage with bl->bufs[bl->cur] */
+    BufList *bl;     /* all open buffers (buffer.c owns the list) */
     int mode;
     int focus;
     int term_open;
@@ -90,6 +91,8 @@ void cmd_quit(void);
 void cmd_clip_copy(void);
 void cmd_clip_paste(void);
 void cmd_fuzzy(void);
+void cmd_buf_prev(void);
+void cmd_buf_next(void);
 void cmd_toggle_term(void);
 void cmd_switch_focus(void);
 

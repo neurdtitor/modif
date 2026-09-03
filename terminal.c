@@ -11,10 +11,10 @@ int term_raw(void) {
     if (!isatty(STDIN_FILENO)) return -1;
     if (tcgetattr(STDIN_FILENO, &orig) == -1) return -1;
     struct termios raw = orig;
-    raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-    raw.c_oflag &= ~(OPOST);
+    raw.c_iflag &= (tcflag_t)~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    raw.c_oflag &= (tcflag_t)~(OPOST);
     raw.c_cflag |= CS8;
-    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+    raw.c_lflag &= (tcflag_t)~(ECHO | ICANON | IEXTEN | ISIG);
     raw.c_cc[VMIN] = 0;
     raw.c_cc[VTIME] = 1;
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) return -1;

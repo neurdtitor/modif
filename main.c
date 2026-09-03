@@ -205,7 +205,8 @@ static void render_term_row(struct abuf *ab, int y) {
     int curfg = -1, curbg = -1, curbold = -1;
     for (int x = 0; x < ncols; x++) {
         Cell *c = NULL;
-        if (x < term.cols) c = &term.cells[(size_t)y * term.cols + x];
+        if (x < term.cols)
+            c = &term.cells[(size_t)y * (size_t)term.cols + (size_t)x];
         char ch = c ? (char)c->ch : ' ';
         int fg = c ? c->fg : -1;
         int bg = c ? c->bg : -1;

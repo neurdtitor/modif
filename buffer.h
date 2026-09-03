@@ -24,7 +24,23 @@ typedef struct {
     size_t nlines;
     size_t lcap;
     char *name;
+    /* View state saved with the buffer. The active buffer is edited through
+     * Editor.buf (which shares the buffer's storage); bl_sync() folds the
+     * editor's live view back into this struct on buffer switch. */
+    size_t cur, top, left, mark;
+    int dirty;
 } Buffer;
+
+/* List of open buffers, owned by buffer.c. The editor keeps one active Buffer
+ * (a shallow alias: same gb.data / lines storage) and switches by swapping the
+ * whole struct, so the active copy and bl->bufs[bl->cur] must always be synced
+ * together. */
+typedef struct {
+    Buffer *bufs;
+    size_t n;   /* number of open buffers */
+    size_t cur; /* active index */
+    size_t cap;
+} BufList;
 
 void gb_init(GapBuf *g);
 void gb_free(GapBuf *g);
@@ -45,5 +61,11 @@ void buf_insert(Buffer *b, size_t pos, const char *s, size_t n);
 void buf_delete(Buffer *b, size_t pos, size_t n);
 size_t buf_line_of(Buffer *b, size_t pos);
 void buf_line_slice(Buffer *b, size_t li, char *out, size_t cap);
+
+void bl_init(BufList *bl);
+void bl_free(BufList *bl);
+Buffer *bl_add(BufList *bl, Buffer *nb);   /* appends, becomes the active buffer */
+void bl_remove(BufList *bl, size_t idx);
+void bl_switch(BufList *bl, long dir);     /* move the active index by dir */
 
 #endif

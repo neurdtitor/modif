@@ -12,12 +12,15 @@ patch layers one optional feature on top.
   in that order. The current chain is:
 
       HEAD (pristine base)
-        └─ 01-buffers.diff       multi-buffer + quit-all + buffer fuzzy
-             └─ 02-multicursor.diff   multiple cursors (builds on 01)
-                  └─ 03-treesitter.diff   tree-sitter syntax highlighting (builds on 01)
+        └─ 01-buffers.diff       :new/:e/:bd, quit-all prompts, buffer fuzzy
+             └─ 02-multicursor.diff   multiple cursors (builds on the base's
+             │                        buffer list and per-buffer view state)
+                  └─ 03-treesitter.diff   tree-sitter syntax highlighting
 
-  Each patch depends on the one before it: 02 needs 01's `E.bl` buffer list,
-  03 needs 01's per-buffer `hl_dirty()` reset. Do not reorder them.
+  The buffer machinery that used to live in `01` (the `BufList`, per-buffer
+  view state, `buf_sync`/`buf_load`, undo reset on switch, `:bn`/`:bp`/`:ls`)
+  is **core now**, so `01` is a thin layer of commands and prompts. `02` and
+  `03` depend on the base's buffer support rather than on `01`'s internals.
 - A patch is generated with `git diff HEAD` against a clean tree, so it
   contains exactly one feature and nothing else. Build artifacts (`.o`,
   the binary) are never included.
@@ -25,12 +28,23 @@ patch layers one optional feature on top.
   (Otherwise patches would start overlapping and the whole model breaks.)
 - If the base changes under a patch, regenerate it: remove, edit, re-`mkpatch`.
 
+### Buffer state is a base invariant
+
+The base owns buffer lifecycle: `Buffer` carries per-buffer view state
+(`cur`/`top`/`left`/`mark`/`dirty`), `buffer.c` owns the `BufList`, and
+`edit.c`'s `buf_sync`/`buf_load`/`buf_add`/`buf_switch` fold the active
+buffer's content, view, and gap metadata back into its slot on switch. The
+active copy and `bl->bufs[bl->cur]` **share storage** and must always be
+synced together — a patch must never copy only part of a `Buffer` struct, or
+edits will silently vanish on switch. The undo log is global, linear, and
+reset by the base on every buffer switch; no patch may redefine undo's shape.
+
 ### Undo is frozen
 
 Undo is **linear, in the base, and never touched by a patch**. The base's
 `cmd_undo`/`cmd_redo` in `edit.c` are the one and only undo model; no patch
-may redefine undo's shape (not per-buffer, not a tree). `01-buffers` resets
-the global undo log on buffer switch, but the model itself stays the base's.
+may redefine undo's shape (not per-buffer, not a tree). The base resets the
+global undo log on buffer switch, so undo never grows stale across buffers.
 If a tree/branching undo is ever wanted, it is the one patch allowed to
 rewrite undo — and once merged, nothing else redefines it again.
 
@@ -39,7 +53,8 @@ rewrite undo — and once merged, nothing else redefines it again.
 A patch that adds state adds a **struct owned by its own file**, and the
 Editor only holds a pointer to it — it does not bolt fields onto `Editor`.
 `02-multicursor` adds `MCState` in `mc.c`; `03-treesitter` adds `HLState` in
-`highlight.c`. This keeps patches isolated and reviewable.
+`highlight.c`. (`01-buffers` needs no struct: the buffer list it used to
+carry is base.) This keeps patches isolated and reviewable.
 
 ## Workflow
 
@@ -80,8 +95,20 @@ you).
 `git diff HEAD` captures only your new work, so make sure the working tree
 differs from `HEAD` only by this feature (commit or `git checkout .` any
 other changes first). If you have uncommitted work you want to keep, `git
-stash` it before starting step 1. For a patch that builds on applied ones,
-apply them first, hack on top, and number the new patch after the last one.
+stash` it before starting step 1.
+
+Note: `git checkout .` also restores tracked patch files, so when you
+**regenerate an existing patch** (not create a new one), keep the new
+`.diff`: `git checkout -- <source files>` instead of `git checkout .`. For a
+patch that builds on applied ones, apply them first, hack on top, and number
+the new patch after the last one — then capture it against a temporary commit
+of the applied state:
+
+    git add -A && git commit -m temp            # base + applied patches
+    git reset --hard HEAD~1                      # back to the base
+    <re-apply the patches>
+    git add -A && git commit -m temp2            # base + patches again
+    git diff temp2 temp -- . ':(exclude)patches/*.diff' > patches/<name>.diff
 
 ## Scripts
 

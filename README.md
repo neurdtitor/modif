@@ -19,19 +19,25 @@ and recompile. If you can't read the whole core in an evening, it's too big.
 
 ## Status
 
-v0 works: gap-buffer editing, modal insert/normal/visual, `:w`/`:q`
-commands, search, fuzzy finder, an embedded terminal pane, and a system
-clipboard. Features that aren't core — multiple buffers, multiple cursors,
-tree-sitter syntax highlighting — ship as ordered patches (see below). The
-core stays deliberately small.
+v0 works: gap-buffer editing, modal insert/normal/visual, multiple buffers,
+`:w`/`:q` commands, search, fuzzy finder, an embedded terminal pane, and a
+system clipboard. Buffer management lives in the core (per-buffer view state,
+a buffer list, `:bn`/`:bp`/`:ls`), so patches build on a stable foundation
+instead of re-homing core state. Features that aren't core — multi-buffer
+extras, multiple cursors, tree-sitter syntax highlighting — ship as ordered
+patches (see below). The core stays deliberately small.
 
 ## What's here (v0)
 
 - **Core editing**: gap buffer, insert/normal/visual modes, motions and
   editing commands, linear undo/redo, yank/paste
+- **Buffer management**: each buffer remembers its own cursor/view/dirty
+  state; a buffer list owns lifecycle (`buf_add`/`buf_switch`); switching
+  resets the single global undo log. Basic commands `:bn`/`:bp`/`:ls` and
+  `H`/`L` are bound in the base
 - **`config.h`-based keybindings**: a plain array of `{key, function}`
   entries — no keybinding DSL
-- **File I/O**: open, save, dirty-buffer warning on quit
+- **File I/O**: open, save, dirty-buffer warning on quit (across all buffers)
 - **Terminal UI**: raw mode + direct ANSI escape sequences, no external
   TUI library
 - **Split panes**: minimal split hosting an embedded terminal beside a
@@ -64,9 +70,11 @@ Type `:` then one of:
 | Command | Action                          |
 |---------|---------------------------------|
 | `:w`    | save                            |
-| `:q`    | quit (refuses when modified)    |
+| `:q`    | quit (refuses when any buffer is modified) |
 | `:q!`   | quit without saving             |
-| `:wq` / `:x` | save and quit             |
+| `:wq` / `:x` | save and quit (refuses if an unnamed buffer can't save) |
+| `:bn` / `:bp` | next / previous buffer    |
+| `:ls` / `:buffers` | list buffers           |
 
 `Esc` cancels a command line.
 
@@ -91,6 +99,7 @@ Type `:` then one of:
 | normal   | `p` / `P`      | paste after / before            |
 | normal   | `u` / `Ctrl-R` | undo / redo                     |
 | normal   | `/` `n` `N`    | search, next, prev              |
+| normal   | `H` / `L`      | previous / next buffer          |
 | normal   | `:`            | command line                    |
 | normal   | `Ctrl-D/U`     | half page down/up               |
 | normal   | `PgUp`/`PgDn`  | page up/down                    |
@@ -131,13 +140,14 @@ extend the selection (`2j`, `10l`). `Esc` cancels a pending count or operator.
 - Undo tree (undo is a permanent, linear base feature — see `patches/README.md`)
 
 These aren't rejected forever — just not part of v0. Anything here can come
-back as an optional patch later.
+back as an optional patch later. Multiple buffers are **core**, not a patch:
+the buffer list and per-buffer view state are the foundation patches build on.
 
 ## Design notes
 
 | Component      | Approach                                            |
 |-----------------|------------------------------------------------------|
-| Buffer          | Gap buffer                                           |
+| Buffer          | Gap buffer + buffer list with per-buffer view state   |
 | Rendering       | Raw terminal mode, direct ANSI escapes                |
 | Embedded shell  | `forkpty()` + minimal VT100/ANSI subset (à la `st`)   |
 | Fuzzy matching  | Subsequence match + fzf-style scoring                 |
@@ -170,18 +180,20 @@ Features live in `patches/<name>.diff`, one feature per file, applied to the
 pristine base (`HEAD`) with `git apply`. The base is never committed with
 patches applied — the suckless model.
 
-The patches are an explicit, ordered chain, each documented as depending on
-the one before it:
+The patches are an explicit, ordered chain. The base owns buffer lifecycle
+and per-buffer view state, so patches never re-home core state:
 
-    HEAD (pristine base)
-      └─ 01-buffers.diff         multi-buffer + quit-all + buffer fuzzy
+    HEAD (pristine base; buffer list + :bn/:bp/:ls in core)
+      └─ 01-buffers.diff         :new/:e/:bd, quit-all prompts, buffer fuzzy
            └─ 02-multicursor.diff     multiple cursors
                 └─ 03-treesitter.diff     tree-sitter syntax highlighting
 
 Two rules keep the set robust: **undo is linear and frozen in the base** (no
 patch ever redefines it), and **each feature owns its state in its own
 file** (`MCState` in `mc.c`, `HLState` in `highlight.c`) — patches add a
-struct pointer to the Editor, never fields.
+struct pointer to the Editor, never fields. `01` is now a thin layer of
+commands and prompts: the buffer machinery it used to carry lives in the
+base, so `02` and `03` build on a stable core.
 
     ./patches/apply.sh && make   # apply all + rebuild (idempotent)
     ./patches/remove.sh <name>   # un-apply one patch

@@ -378,7 +378,11 @@ again:;
         int consumed = 0;
         int key = kb_decode(inq + off, inqlen - off, &consumed);
         if (key == 0) {
-            if (inqlen - off == 1 && inq[off] == ESC) {
+            if (inq[off] == ESC) {
+                /* Escape-prefixed: a bare ESC is the ESC key, while a partial
+                 * or unknown escape sequence needs the rest of its bytes. Wait
+                 * briefly for them; if they never arrive, drop the whole
+                 * sequence so the input buffer can never stall the editor. */
                 fd_set rfds;
                 struct timeval tv = { 0, 8000 };
                 FD_ZERO(&rfds);
@@ -388,13 +392,18 @@ again:;
                     inqlen -= off;
                     goto again;
                 }
-                key = ESC;
-                consumed = 1;
+                if (inqlen - off == 1) {
+                    key = ESC;              /* bare ESC key */
+                    consumed = 1;
+                } else if (consumed < 1)
+                    consumed = 1;           /* drop at least the ESC */
+                /* else: drop the whole partial/unknown sequence */
             } else {
-                break;
+                consumed = 1; /* unknown byte: drop it so input can't stall */
             }
         }
-        handle_key(key);
+        if (key)
+            handle_key(key);
         off += (size_t)consumed;
     }
     memmove(inq, inq + off, inqlen - off);

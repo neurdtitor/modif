@@ -10,7 +10,7 @@ static int decode_csi(const char *buf, size_t len, int *consumed) {
            (buf[i] == ';' || buf[i] == '?' || buf[i] == '<' || buf[i] == '=' ||
             (buf[i] >= '0' && buf[i] <= '9')))
         i++;
-    if (i >= len) return 0;
+    if (i >= len) { *consumed = (int)i; return 0; } /* partial sequence */
     char fin = buf[i];
     int p1 = 0;
     size_t j = 1;
@@ -63,10 +63,12 @@ int kb_decode(const char *buf, size_t len, int *consumed) {
     }
     if (len < 2) return 0;
     if (buf[1] == '[') {
-        return decode_csi(buf + 1, len - 1, consumed);
+        int r = decode_csi(buf + 1, len - 1, consumed);
+        if (*consumed > 0) (*consumed)++; /* count the leading ESC */
+        return r;
     }
     if (buf[1] == 'O') {
-        if (len < 3) return 0;
+        if (len < 3) { *consumed = 2; return 0; } /* partial ESC O ... */
         *consumed = 3;
         switch (buf[2]) {
         case 'A': return ARROW_UP;

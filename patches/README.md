@@ -19,9 +19,15 @@ patch layers one optional feature on top.
 
 ## Workflow
 
-### Apply everything and rebuild
+### Apply patches and rebuild
 
     ./patches/apply.sh && make
+
+With no arguments `apply.sh` applies every patch that isn't applied yet,
+in numeric order. To apply just one (or a few), name it:
+
+    ./patches/apply.sh quitall
+    ./patches/apply.sh 06 undotree        # names / unique prefixes
 
 Idempotent: `apply.sh` records what it has applied in `.patches-applied`
 (gitignored) and skips those on later runs. It removes the `.o` files and the
@@ -29,13 +35,15 @@ binary after applying, so `make` always rebuilds from the patched sources —
 this also sidesteps stale-builds caused by sub-second mtimes. Patches that no
 longer apply cleanly are reported as conflicts.
 
-### Remove one patch
+### Remove patches
 
-    ./patches/remove.sh <name>
+    ./patches/remove.sh <name>    # one patch
+    ./patches/remove.sh all       # every applied patch (reverse order)
 
 `<name>` is a prefix, so `./patches/remove.sh quitall` or
 `./patches/remove.sh 02-quitall` both work. Removing a patch that others
-build on breaks those — remove them in reverse order.
+build on breaks those — remove them in reverse order (`all` does this for
+you).
 
 ### Create a new patch
 
@@ -55,8 +63,8 @@ apply them first, hack on top, and number the new patch after the last one.
 
 | Script                 | Purpose                                   |
 |------------------------|-------------------------------------------|
-| `patches/apply.sh`     | apply all `.diff` files (idempotent)      |
-| `patches/remove.sh`    | un-apply one patch                        |
+| `patches/apply.sh`     | apply all patches, or named ones          |
+| `patches/remove.sh`    | un-apply one patch, or all                |
 | `patches/mkpatch.sh`   | capture current edits as a new patch      |
 
 Patches are plain `git diff` output and also work with stock tooling:

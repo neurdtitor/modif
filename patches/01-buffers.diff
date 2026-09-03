@@ -1,98 +1,5 @@
-diff --git a/buffer.c b/buffer.c
-index 7a7fc95..0df47c0 100644
---- a/buffer.c
-+++ b/buffer.c
-@@ -121,6 +121,8 @@ void buf_init(Buffer *b) {
-     b->nlines = 0;
-     b->lcap = 0;
-     b->name = NULL;
-+    b->cur = b->top = b->left = b->mark = 0;
-+    b->dirty = 0;
- }
- 
- void buf_free(Buffer *b) {
-@@ -250,4 +252,42 @@ void buf_line_slice(Buffer *b, size_t li, char *out, size_t cap) {
-     size_t n = l->len < cap - 1 ? l->len : cap - 1;
-     for (size_t i = 0; i < n; i++) out[i] = gb_at(&b->gb, l->start + i);
-     out[n] = '\0';
-+}
-+
-+/* ------------------------------- buffer list ------------------------------ */
-+
-+void bl_init(BufList *bl) {
-+    bl->bufs = NULL;
-+    bl->n = 0;
-+    bl->cur = 0;
-+    bl->cap = 0;
-+}
-+
-+void bl_free(BufList *bl) {
-+    for (size_t i = 0; i < bl->n; i++) buf_free(&bl->bufs[i]);
-+    free(bl->bufs);
-+    bl_init(bl);
-+}
-+
-+Buffer *bl_add(BufList *bl, Buffer *nb) {
-+    if (bl->n == bl->cap) {
-+        bl->cap = bl->cap ? bl->cap * 2 : 4;
-+        bl->bufs = realloc(bl->bufs, bl->cap * sizeof(Buffer));
-+    }
-+    bl->bufs[bl->n] = *nb;
-+    bl->cur = bl->n++;
-+    return &bl->bufs[bl->cur];
-+}
-+
-+void bl_remove(BufList *bl, size_t idx) {
-+    buf_free(&bl->bufs[idx]);
-+    memmove(&bl->bufs[idx], &bl->bufs[idx + 1],
-+            (bl->n - idx - 1) * sizeof(Buffer));
-+    bl->n--;
-+    if (bl->cur >= bl->n) bl->cur = bl->n ? bl->n - 1 : 0;
-+}
-+
-+void bl_switch(BufList *bl, long dir) {
-+    if (bl->n < 2) return;
-+    bl->cur = (size_t)(((long)bl->cur + dir + (long)bl->n) % (long)bl->n);
- }
-\ No newline at end of file
-diff --git a/buffer.h b/buffer.h
-index 6619e32..9d27be7 100644
---- a/buffer.h
-+++ b/buffer.h
-@@ -24,8 +24,19 @@ typedef struct {
-     size_t nlines;
-     size_t lcap;
-     char *name;
-+    size_t cur, top, left, mark; /* saved view state */
-+    int dirty;
- } Buffer;
- 
-+/* List of open buffers. Editor holds a BufList*; the active buffer is edited
-+ * through Editor.buf and synced back into bl->bufs[bl->cur] on switch. */
-+typedef struct {
-+    Buffer *bufs;
-+    size_t n;
-+    size_t cur;
-+    size_t cap;
-+} BufList;
-+
- void gb_init(GapBuf *g);
- void gb_free(GapBuf *g);
- size_t gb_len(GapBuf *g);
-@@ -46,4 +57,10 @@ void buf_delete(Buffer *b, size_t pos, size_t n);
- size_t buf_line_of(Buffer *b, size_t pos);
- void buf_line_slice(Buffer *b, size_t li, char *out, size_t cap);
- 
-+void bl_init(BufList *bl);
-+void bl_free(BufList *bl);
-+Buffer *bl_add(BufList *bl, Buffer *nb);
-+void bl_remove(BufList *bl, size_t idx);
-+void bl_switch(BufList *bl, long dir);
-+
- #endif
-\ No newline at end of file
 diff --git a/config.h b/config.h
-index 40fd0f5..5803f1b 100644
+index cbec3dd..5803f1b 100644
 --- a/config.h
 +++ b/config.h
 @@ -23,6 +23,7 @@ static const KeyBind global_keys[] = {
@@ -103,69 +10,30 @@ index 40fd0f5..5803f1b 100644
      { 't', cmd_toggle_term },
      { 'w', cmd_switch_focus },
      { 's', cmd_save },
-@@ -48,6 +49,7 @@ static const KeyBind normal_keys[] = {
-     { 'u', cmd_undo }, { CTRL('R'), cmd_redo },
-     { '/', cmd_search }, { 'n', cmd_search_next }, { 'N', cmd_search_prev },
-     { ':', cmd_colon }, { 'v', cmd_visual },
-+    { 'H', cmd_buf_prev }, { 'L', cmd_buf_next },
-     { CTRL('D'), cmd_half_down }, { CTRL('U'), cmd_half_up },
-     { PAGE_UP, cmd_page_up }, { PAGE_DOWN, cmd_page_down },
-     { ENTER, cmd_down },
 diff --git a/edit.c b/edit.c
-index 7fea99b..865fb82 100644
+index c2c7952..929c660 100644
 --- a/edit.c
 +++ b/edit.c
-@@ -577,6 +577,91 @@ static void visual_key(int key) {
-     count_reset();
+@@ -641,6 +641,107 @@ static void buf_list(void) {
+     edit_set_status("%s", tmp);
  }
  
-+/* --------------------------- buffer list management ------------------------ */
++/* --------------------------- buffer list extras ---------------------------- */
 +
-+/* One active buffer lives in E.buf, the full set in E.bl->bufs[]. While a
-+ * buffer is active it is edited through E.buf; buf_sync() pushes it (plus view
-+ * state) back into its slot before switching, buf_load() pulls another slot in.
-+ * The undo log stays in the base: one global linear history, reset when the
-+ * active buffer changes, so it never grows stale across buffers. */
-+
-+static void buf_sync(void) {
-+    if (!E.bl || !E.bl->n) return;
-+    Buffer *b = &E.bl->bufs[E.bl->cur];
-+    b->cur = E.cur;
-+    b->top = E.top;
-+    b->left = E.left;
-+    b->mark = E.mark;
-+    b->dirty = E.dirty;
++/* Save a specific buffer (possibly not the active one). */
++static void save_buffer(Buffer *b) {
++    if (!b->name) {
++        edit_set_status("no file name");
++        return;
++    }
++    if (buf_save(b) == 0) {
++        b->dirty = 0;
++        if (b == &E.buf) E.dirty = 0;
++        edit_set_status("saved %s (%zu bytes)", b->name, gb_len(&b->gb));
++    } else {
++        edit_set_status("write error: %s", strerror(errno));
++    }
 +}
-+
-+static void buf_load(size_t i) {
-+    Buffer *b = &E.bl->bufs[i];
-+    E.bl->cur = i;
-+    E.buf = *b;
-+    E.cur = b->cur;
-+    E.top = b->top;
-+    E.left = b->left;
-+    E.mark = b->mark;
-+    E.dirty = b->dirty;
-+    for (size_t k = 0; k < un; k++) free(ustack[k].data); /* fresh undo per buffer */
-+    un = 0;
-+    upos = 0;
-+}
-+
-+static void buf_add(Buffer *nb) {
-+    buf_sync();
-+    bl_add(E.bl, nb);
-+    buf_load(E.bl->cur);
-+}
-+
-+static void buf_switch(int dir) {
-+    if (E.bl->n < 2) return;
-+    buf_sync();
-+    bl_switch(E.bl, dir);
-+    buf_load(E.bl->cur);
-+}
-+
-+void cmd_buf_prev(void) { buf_switch(-1); }
-+void cmd_buf_next(void) { buf_switch(1); }
 +
 +static void buf_new(void) {
 +    Buffer nb;
@@ -190,30 +58,7 @@ index 7fea99b..865fb82 100644
 +    buf_load(E.bl->cur);
 +}
 +
-+static void buf_list(void) {
-+    buf_sync();
-+    char tmp[160];
-+    size_t off = 0;
-+    off += (size_t)snprintf(tmp + off, sizeof tmp - off, "%zu buffer(s):", E.bl->n);
-+    for (size_t i = 0; i < E.bl->n && off < sizeof tmp; i++) {
-+        const char *n = E.bl->bufs[i].name ? E.bl->bufs[i].name : "[no name]";
-+        off += (size_t)snprintf(tmp + off, sizeof tmp - off, " %zu%s%s%s",
-+                                i + 1, i == E.bl->cur ? "%" : "", n,
-+                                E.bl->bufs[i].dirty ? "*" : "");
-+    }
-+    edit_set_status("%s", tmp);
-+}
-+
- /* ------------------------------ : command mode ---------------------------- */
- 
- void cmd_colon(void) {
-@@ -585,23 +670,95 @@ void cmd_colon(void) {
-     E.cmdq[0] = '\0';
- }
- 
 +/* ------------------------- quit all + save prompts ------------------------ */
-+
-+static void save_buffer(Buffer *b);
 +
 +static size_t pp_idx; /* buffer index being prompted, SIZE_MAX = none */
 +
@@ -274,35 +119,41 @@ index 7fea99b..865fb82 100644
 +    }
 +}
 +
- static void cmd_execute(void) {
+ /* ------------------------------ : command mode ---------------------------- */
+ 
+ void cmd_colon(void) {
+@@ -659,20 +760,15 @@ static void cmd_execute(void) {
      char *c = E.cmdq;
      if (!strcmp(c, "w") || !strcmp(c, "write")) {
          cmd_save();
 -    } else if (!strcmp(c, "q")) {
 -        if (E.dirty)
 -            edit_set_status("No write since last change (use :q! to quit)");
+-        else if (any_dirty())
+-            edit_set_status("another buffer has unsaved changes (use :q! to quit)");
 -        else
 -            g_quit = 1;
 -    } else if (!strcmp(c, "q!") || !strcmp(c, "quit!")) {
 -        g_quit = 1;
--    } else if (!strcmp(c, "wq") || !strcmp(c, "x")) {
--        cmd_save();
--        if (!E.dirty) g_quit = 1;
--    } else if (!strcmp(c, "wq!")) {
--        cmd_save();
 +    } else if (!strcmp(c, "q") || !strcmp(c, "qa")) {
 +        quit_all(0);
-+    } else if (!strcmp(c, "q!") || !strcmp(c, "qa!")) {
++    } else if (!strcmp(c, "q!") || !strcmp(c, "qa!") || !strcmp(c, "quit!")) {
 +        quit_all(1);
-+    } else if (!strcmp(c, "wq") || !strcmp(c, "x") || !strcmp(c, "wq!")) {
+     } else if (!strcmp(c, "wq") || !strcmp(c, "x")) {
+-        cmd_save();
+-        if (!E.dirty && !any_dirty()) g_quit = 1;
++        save_all();
++        if (!any_dirty()) g_quit = 1; /* stay if an unnamed buffer couldn't save */
+     } else if (!strcmp(c, "wq!")) {
+-        cmd_save();
 +        save_all();
          g_quit = 1;
-+    } else if (!strcmp(c, "bn") || !strcmp(c, "bnext")) {
-+        buf_switch(1);
-+    } else if (!strcmp(c, "bp") || !strcmp(c, "bprev")) {
-+        buf_switch(-1);
-+    } else if (!strcmp(c, "ls") || !strcmp(c, "buffers")) {
-+        buf_list();
+     } else if (!strcmp(c, "bn") || !strcmp(c, "bnext")) {
+         buf_switch(1);
+@@ -680,6 +776,15 @@ static void cmd_execute(void) {
+         buf_switch(-1);
+     } else if (!strcmp(c, "ls") || !strcmp(c, "buffers")) {
+         buf_list();
 +    } else if (!strcmp(c, "bd") || !strcmp(c, "bdelete")) {
 +        buf_close(0);
 +    } else if (!strcmp(c, "bd!") || !strcmp(c, "bdelete!")) {
@@ -315,44 +166,36 @@ index 7fea99b..865fb82 100644
      } else if (c[0] != '\0') {
          edit_set_status("unknown command: %s", c);
      }
-@@ -620,7 +777,7 @@ static void cmd_key(int key) {
+@@ -698,7 +803,7 @@ static void cmd_key(int key) {
          break;
      case ENTER:
          cmd_execute();
 -        E.mode = MODE_NORMAL;
-+        if (E.mode == MODE_CMD) E.mode = MODE_NORMAL;
++        if (E.mode == MODE_CMD) E.mode = MODE_NORMAL; /* :qa may drop into a prompt */
          break;
      case BACKSPACE:
      case CTRL('H'):
-@@ -639,19 +796,22 @@ static void cmd_key(int key) {
+@@ -717,18 +822,7 @@ static void cmd_key(int key) {
  
  /* ----------------------------- file I/O, panes ----------------------------- */
  
 -void cmd_save(void) {
 -    if (!E.buf.name) {
-+static void save_buffer(Buffer *b) {
-+    if (!b->name) {
-         edit_set_status("no file name");
-         return;
-     }
+-        edit_set_status("no file name");
+-        return;
+-    }
 -    if (buf_save(&E.buf) == 0) {
 -        E.dirty = 0;
 -        edit_set_status("saved %s (%zu bytes)", E.buf.name, gb_len(&E.buf.gb));
-+    if (buf_save(b) == 0) {
-+        b->dirty = 0;
-+        if (b == &E.buf) E.dirty = 0;
-+        edit_set_status("saved %s (%zu bytes)", b->name, gb_len(&b->gb));
-     } else {
-         edit_set_status("write error: %s", strerror(errno));
-     }
- }
- 
+-    } else {
+-        edit_set_status("write error: %s", strerror(errno));
+-    }
+-}
 +void cmd_save(void) { save_buffer(&E.buf); }
-+
+ 
  static int quit_times = 3;
  
- void cmd_quit(void) {
-@@ -682,10 +842,33 @@ void cmd_fuzzy(void) {
+@@ -760,10 +854,34 @@ void cmd_fuzzy(void) {
      E.fqlen = 0;
      E.fq[0] = '\0';
      E.fsel = 0;
@@ -361,6 +204,7 @@ index 7fea99b..865fb82 100644
      fuzzy_filter(&E);
  }
  
++/* Fuzzy pick among the open buffers instead of files on disk. */
 +void cmd_buf_fuzzy(void) {
 +    fuzzy_free(&E);
 +    E.flist = malloc((E.bl->n ? E.bl->n : 1) * sizeof(char *));
@@ -386,7 +230,7 @@ index 7fea99b..865fb82 100644
  /* ------------------------------- fuzzy keys ------------------------------- */
  
  static void fuzzy_key(int key) {
-@@ -702,6 +885,14 @@ static void fuzzy_key(int key) {
+@@ -780,6 +898,14 @@ static void fuzzy_key(int key) {
          break;
      case ENTER:
          if (E.fcount && E.fsel < (int)E.fcount) {
@@ -401,7 +245,7 @@ index 7fea99b..865fb82 100644
              char path[1024];
              snprintf(path, sizeof path, "%s", E.flist[E.fidx[E.fsel]]);
              fuzzy_free(&E);
-@@ -751,6 +942,7 @@ static int leader_handle(int key) {
+@@ -829,6 +955,7 @@ static int leader_handle(int key) {
  
  void edit_handle_key(int key) {
      if (key != CTRL('Q')) quit_times = 3;
@@ -409,7 +253,7 @@ index 7fea99b..865fb82 100644
      if (E.mode == MODE_SEARCH) { search_key(key); return; }
      if (E.mode == MODE_FUZZY) { fuzzy_key(key); return; }
      if (E.mode == MODE_CMD) { cmd_key(key); return; }
-@@ -862,7 +1054,9 @@ void edit_status(void) {
+@@ -944,7 +1071,9 @@ void edit_status(void) {
          return;
      }
      if (E.mode == MODE_FUZZY) {
@@ -420,7 +264,7 @@ index 7fea99b..865fb82 100644
                   E.fq, E.fcount);
          return;
      }
-@@ -870,6 +1064,11 @@ void edit_status(void) {
+@@ -952,6 +1081,11 @@ void edit_status(void) {
          snprintf(E.status, sizeof E.status, ":%s", E.cmdq);
          return;
      }
@@ -432,31 +276,7 @@ index 7fea99b..865fb82 100644
      if (E.msg[0] && time(NULL) - E.msg_time < 5) {
          strncpy(E.status, E.msg, sizeof E.status - 1);
          E.status[sizeof E.status - 1] = '\0';
-@@ -881,8 +1080,9 @@ void edit_status(void) {
-                    : E.mode == MODE_VISUAL ? "VISUAL" : "NORMAL";
-     const char *fname = E.buf.name ? E.buf.name : "[no file]";
-     snprintf(E.status, sizeof E.status,
--             "modif %s  %s  [%s]  %zu:%zu/%zu%s%s",
--             MODIF_VERSION, fname, m, li + 1, col + 1, E.buf.nlines,
-+             "modif %s  %s  [%s]  %zu/%zu  %zu:%zu/%zu%s%s",
-+             MODIF_VERSION, fname, m, E.bl->cur + 1, E.bl->n, li + 1, col + 1,
-+             E.buf.nlines,
-              E.dirty ? "  *modified*" : "",
-              E.focus == FOCUS_TERM ? "  [TERM]" : "");
- }
-@@ -896,8 +1096,11 @@ void edit_set_status(const char *fmt, ...) {
- }
- 
- void edit_init(void) {
-+    E.bl = malloc(sizeof(BufList));
-+    bl_init(E.bl);
-     buf_init(&E.buf);
-     buf_build_lines(&E.buf); /* always at least one empty line */
-+    buf_add(&E.buf);
-     E.mode = MODE_NORMAL;
-     E.focus = FOCUS_EDIT;
-     E.term_open = 0;
-@@ -926,39 +1129,57 @@ void edit_init(void) {
+@@ -1012,6 +1146,8 @@ void edit_init(void) {
      E.fcount = 0;
      E.fqlen = 0;
      E.fsel = 0;
@@ -465,79 +285,11 @@ index 7fea99b..865fb82 100644
      leader = 0;
      count_reset();
  }
- 
- void edit_open(const char *path) {
--    Buffer nb;
--    buf_init(&nb);
--    if (buf_open(&nb, path) == -1) {
--        edit_set_status("cannot open %s: %s", path, strerror(errno));
--        buf_free(&nb);
--        return;
-+    /* switch to an already-open buffer with the same name */
-+    for (size_t i = 0; i < E.bl->n; i++)
-+        if (E.bl->bufs[i].name && !strcmp(E.bl->bufs[i].name, path)) {
-+            buf_sync();
-+            buf_load(i);
-+            goto opened;
-+        }
-+
-+    /* reuse the unnamed empty buffer in place when it is current */
-+    if (!E.buf.name && !E.dirty && gb_len(&E.buf.gb) == 0) {
-+        Buffer nb;
-+        buf_init(&nb);
-+        if (buf_open(&nb, path) == -1) {
-+            edit_set_status("cannot open %s: %s", path, strerror(errno));
-+            buf_free(&nb);
-+            return;
-+        }
-+        buf_sync();
-+        buf_free(&E.bl->bufs[E.bl->cur]);
-+        E.bl->bufs[E.bl->cur] = nb;
-+        buf_load(E.bl->cur);
-+        goto opened;
-     }
--    buf_free(&E.buf);
--    E.buf = nb;
--    E.cur = 0;
--    E.top = 0;
--    E.left = 0;
--    E.mark = 0;
-+
-+    {
-+        Buffer nb;
-+        buf_init(&nb);
-+        if (buf_open(&nb, path) == -1) {
-+            edit_set_status("cannot open %s: %s", path, strerror(errno));
-+            buf_free(&nb);
-+            return;
-+        }
-+        buf_add(&nb);
-+    }
-+
-+opened:
-     E.cmdlen = 0;
-     E.cmdq[0] = '\0';
--    E.dirty = 0;
-     E.mode = MODE_NORMAL;
-     E.focus = FOCUS_EDIT;
-     E.term_open = 0;
-     E.sqlen = 0;
-     E.smatch = (size_t)-1;
-     E.sactive = 0;
--    for (size_t i = 0; i < un; i++) free(ustack[i].data);
--    un = 0;
--    upos = 0;
--    free(ybuf);
--    ybuf = NULL;
--    ylen = 0;
-     leader = 0;
-     count_reset();
- }
 diff --git a/edit.h b/edit.h
-index 2f6e107..8749cf3 100644
+index b9c170d..c3b9db6 100644
 --- a/edit.h
 +++ b/edit.h
-@@ -8,11 +8,12 @@
+@@ -8,7 +8,7 @@
  typedef void (*cmd_fn)(void);
  typedef struct { int key; cmd_fn fn; } KeyBind;
  
@@ -546,13 +298,7 @@ index 2f6e107..8749cf3 100644
  enum { FOCUS_EDIT = 0, FOCUS_TERM };
  
  typedef struct {
--    Buffer buf;
-+    Buffer buf;        /* current buffer; bl->bufs[bl->cur] mirrors it while active */
-+    BufList *bl;       /* all open buffers (buffer.c owns the struct) */
-     int mode;
-     int focus;
-     int term_open;
-@@ -44,6 +45,7 @@ typedef struct {
+@@ -45,6 +45,7 @@ typedef struct {
      char fq[128];
      size_t fqlen;
      int fsel;
@@ -560,29 +306,27 @@ index 2f6e107..8749cf3 100644
  } Editor;
  
  extern Editor E;
-@@ -90,6 +92,9 @@ void cmd_quit(void);
- void cmd_clip_copy(void);
- void cmd_clip_paste(void);
+@@ -93,6 +94,7 @@ void cmd_clip_paste(void);
  void cmd_fuzzy(void);
-+void cmd_buf_prev(void);
-+void cmd_buf_next(void);
+ void cmd_buf_prev(void);
+ void cmd_buf_next(void);
 +void cmd_buf_fuzzy(void);
  void cmd_toggle_term(void);
  void cmd_switch_focus(void);
  
 diff --git a/fuzzy.c b/fuzzy.c
-index 49c295f..4c09ba1 100644
+index da61f88..79d3676 100644
 --- a/fuzzy.c
 +++ b/fuzzy.c
-@@ -133,4 +133,5 @@ void fuzzy_free(Editor *E) {
-     E->fidx = NULL;
-     E->fcount = 0;
-     E->fsel = 0;
-+    E->fbuf = 0;
+@@ -133,4 +133,5 @@ void fuzzy_free(Editor *ed) {
+     ed->fidx = NULL;
+     ed->fcount = 0;
+     ed->fsel = 0;
++    ed->fbuf = 0;
  }
 \ No newline at end of file
 diff --git a/main.c b/main.c
-index 3cb7a8e..f504a77 100644
+index 4f25217..60dcccf 100644
 --- a/main.c
 +++ b/main.c
 @@ -174,7 +174,7 @@ static void render_fuzzy_line(struct abuf *ab, int y, int poptop, int poph) {

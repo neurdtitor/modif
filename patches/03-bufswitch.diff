@@ -1,0 +1,52 @@
+diff --git a/README.md b/README.md
+index 7832641..026d713 100644
+--- a/README.md
++++ b/README.md
+@@ -88,6 +88,7 @@ modified. Each buffer keeps its own cursor position and undo history.
+ | normal/visual | `<Space>` + key | leader prefix (see below)   |
+ | normal   | `h j k l`      | move cursor / arrows            |
+ | normal   | `w b e`        | word motions                    |
++| normal   | `H` / `L`      | previous / next buffer          |
+ | normal   | `0 $ ^`        | line start / end / first word   |
+ | normal   | `g` / `G`      | top / bottom of file            |
+ | normal   | `i a I A o O`  | enter insert mode               |
+diff --git a/config.h b/config.h
+index e7e4af7..93b47d0 100644
+--- a/config.h
++++ b/config.h
+@@ -46,6 +46,7 @@ static const KeyBind normal_keys[] = {
+     { 'u', cmd_undo }, { CTRL('R'), cmd_redo },
+     { '/', cmd_search }, { 'n', cmd_search_next }, { 'N', cmd_search_prev },
+     { ':', cmd_colon }, { 'v', cmd_visual },
++    { 'H', cmd_buf_prev }, { 'L', cmd_buf_next },
+     { CTRL('D'), cmd_half_down }, { CTRL('U'), cmd_half_up },
+     { PAGE_UP, cmd_page_up }, { PAGE_DOWN, cmd_page_down },
+     { ENTER, cmd_down },
+diff --git a/edit.c b/edit.c
+index 7fb311f..c86b5df 100644
+--- a/edit.c
++++ b/edit.c
+@@ -580,6 +580,9 @@ static void buf_switch(int dir) {
+     buf_load((size_t)(((long)E.cb + dir + (long)E.nb) % (long)E.nb));
+ }
+ 
++void cmd_buf_prev(void) { buf_switch(-1); }
++void cmd_buf_next(void) { buf_switch(1); }
++
+ static void buf_new(void) {
+     Buffer nb;
+     buf_init(&nb);
+diff --git a/edit.h b/edit.h
+index 6e9e8e2..c7efd46 100644
+--- a/edit.h
++++ b/edit.h
+@@ -101,5 +101,8 @@ void edit_after(void);
+ void edit_status(void);
+ void edit_set_status(const char *fmt, ...);
+ size_t edit_line_col(void);
++void cmd_buf_prev(void);
++void cmd_buf_next(void);
++void cmd_buf_fuzzy(void);
+ 
+ #endif
+\ No newline at end of file

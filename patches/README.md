@@ -6,12 +6,15 @@ patch layers one optional feature on top.
 
 ## Conventions
 
-- One feature per `.diff`, named after it: `leader.diff`, `linenumbers.diff`.
-- A patch is generated with `git diff HEAD` against a **clean** tree, so it
-  contains exactly one feature and nothing else.
+- One feature per `.diff`, named after it: `01-buffers.diff`, `02-quitall.diff`.
+- The two-digit prefix fixes the **apply order**: a patch may build on an
+  earlier one (`02-quitall` needs `01-buffers`), so patches must apply in
+  numeric order. `apply.sh` applies them in that order.
+- A patch is generated with `git diff HEAD` against a clean tree, so it
+  contains exactly one feature and nothing else. Build artifacts (`.o`,
+  the binary) are never included.
 - Applied patches are **never committed**: `HEAD` is always the pristine core.
   (Otherwise patches would start overlapping and the whole model breaks.)
-- Patches are kept small and non-overlapping, so any subset applies cleanly.
 - If the base changes under a patch, regenerate it: remove, edit, re-`mkpatch`.
 
 ## Workflow
@@ -20,14 +23,19 @@ patch layers one optional feature on top.
 
     ./patches/apply.sh && make
 
-Idempotent: patches that are already applied are skipped, so running it
-again is safe. Patches that no longer apply cleanly are reported as conflicts.
+Idempotent: `apply.sh` records what it has applied in `.patches-applied`
+(gitignored) and skips those on later runs. It removes the `.o` files and the
+binary after applying, so `make` always rebuilds from the patched sources —
+this also sidesteps stale-builds caused by sub-second mtimes. Patches that no
+longer apply cleanly are reported as conflicts.
 
 ### Remove one patch
 
     ./patches/remove.sh <name>
 
-`<name>` is without the `.diff` suffix, e.g. `./patches/remove.sh leader`.
+`<name>` is a prefix, so `./patches/remove.sh quitall` or
+`./patches/remove.sh 02-quitall` both work. Removing a patch that others
+build on breaks those — remove them in reverse order.
 
 ### Create a new patch
 
@@ -37,9 +45,11 @@ again is safe. Patches that no longer apply cleanly are reported as conflicts.
     4. Discard the edit: git checkout .
     5. Apply + build:    ./patches/apply.sh && make
 
-`mkpatch.sh` refuses to run while other patches are applied, so the diff you
-capture is always just your new feature. If you have uncommitted work you
-want to keep, `git stash` it before starting step 1.
+`git diff HEAD` captures only your new work, so make sure the working tree
+differs from `HEAD` only by this feature (commit or `git checkout .` any
+other changes first). If you have uncommitted work you want to keep, `git
+stash` it before starting step 1. For a patch that builds on applied ones,
+apply them first, hack on top, and number the new patch after the last one.
 
 ## Scripts
 

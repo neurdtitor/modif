@@ -1,0 +1,200 @@
+diff --git a/README.md b/README.md
+index 6d22838..7832641 100644
+--- a/README.md
++++ b/README.md
+@@ -67,14 +67,14 @@ Type `:` then one of:
+ | `:bn` / `:bp`    | next / previous buffer              |
+ | `:ls`            | list buffers (`%` = current)        |
+ | `:bd` / `:bd!`   | close buffer (`!` forces, discarding changes) |
+-| `:q`             | close buffer; quit when it's the last |
+-| `:q!`            | close without saving / quit         |
+-| `:wq` / `:x`     | save and close / quit               |
+-
+-`Esc` cancels a command line. Opening a file that is already open switches to
+-it instead of duplicating it. The status line shows `current/total` buffers
+-and marks the current one with `*` when modified. Each buffer keeps its own
+-cursor position and undo history.
++| `:q` / `:qa`     | quit all; prompts "save? (y/n)" for each unsaved buffer |
++| `:q!` / `:qa!`   | quit all, discarding unsaved changes |
++| `:wq` / `:x`     | save all buffers, then quit         |
++
++`Esc` cancels a command line or an in-progress save prompt. Opening a file
++that is already open switches to it instead of duplicating it. The status
++line shows `current/total` buffers and marks the current one with `*` when
++modified. Each buffer keeps its own cursor position and undo history.
+ 
+ ## Keybindings
+ 
+diff --git a/edit.c b/edit.c
+index 1503ecc..7fb311f 100644
+--- a/edit.c
++++ b/edit.c
+@@ -624,29 +624,86 @@ static void buf_list(void) {
+ 
+ /* ------------------------------ : command mode ---------------------------- */
+ 
++static void save_buffer(Buffer *b);
++
+ void cmd_colon(void) {
+     E.mode = MODE_CMD;
+     E.cmdlen = 0;
+     E.cmdq[0] = '\0';
+ }
+ 
++/* ------------------------- quit all + save prompts ------------------------ */
++
++static size_t pp_idx; /* buffer index being prompted, SIZE_MAX = none */
++
++static void save_all(void) {
++    buf_sync();
++    for (size_t i = 0; i < E.nb; i++)
++        if (E.blist[i].dirty) {
++            if (i == E.cb) cmd_save();
++            else save_buffer(&E.blist[i]);
++        }
++    buf_sync();
++}
++
++/* Quit every buffer. Unless force, ask about each unsaved buffer first. */
++static void quit_all(int force) {
++    buf_sync();
++    if (!force)
++        for (size_t i = 0; i < E.nb; i++)
++            if (E.blist[i].dirty) {
++                pp_idx = i;
++                E.mode = MODE_PROMPT;
++                return;
++            }
++    g_quit = 1;
++}
++
++static void prompt_next(void) {
++    for (size_t i = pp_idx + 1; i < E.nb; i++)
++        if (E.blist[i].dirty) {
++            pp_idx = i;
++            return;
++        }
++    E.mode = MODE_NORMAL;
++    g_quit = 1;
++}
++
++static void prompt_key(int key) {
++    switch (key) {
++    case 'y':
++    case 'Y':
++        if (pp_idx == E.cb) cmd_save();
++        else save_buffer(&E.blist[pp_idx]);
++        buf_sync();
++        prompt_next();
++        break;
++    case 'n':
++    case 'N':
++        prompt_next();
++        break;
++    case ESC:
++    case CTRL('C'):
++    case CTRL('G'):
++    case CTRL('Q'):
++        E.mode = MODE_NORMAL;
++        break;
++    default:
++        break;
++    }
++}
++
+ static void cmd_execute(void) {
+     char *c = E.cmdq;
+     if (!strcmp(c, "w") || !strcmp(c, "write")) {
+         cmd_save();
+-    } else if (!strcmp(c, "q")) {
+-        if (E.dirty)
+-            edit_set_status("no write since last change (use :q! to quit)");
+-        else
+-            buf_close(0);
+-    } else if (!strcmp(c, "q!") || !strcmp(c, "quit!")) {
+-        buf_close(1);
+-    } else if (!strcmp(c, "wq") || !strcmp(c, "x")) {
+-        cmd_save();
+-        if (!E.dirty) buf_close(0);
+-    } else if (!strcmp(c, "wq!")) {
+-        cmd_save();
+-        buf_close(1);
++    } else if (!strcmp(c, "q") || !strcmp(c, "qa")) {
++        quit_all(0);
++    } else if (!strcmp(c, "q!") || !strcmp(c, "qa!")) {
++        quit_all(1);
++    } else if (!strcmp(c, "wq") || !strcmp(c, "x") || !strcmp(c, "wq!")) {
++        save_all();
++        g_quit = 1;
+     } else if (!strcmp(c, "bn") || !strcmp(c, "bnext")) {
+         buf_switch(1);
+     } else if (!strcmp(c, "bp") || !strcmp(c, "bprev")) {
+@@ -699,19 +756,22 @@ static void cmd_key(int key) {
+ 
+ /* ----------------------------- file I/O, panes ----------------------------- */
+ 
+-void cmd_save(void) {
+-    if (!E.buf.name) {
++static void save_buffer(Buffer *b) {
++    if (!b->name) {
+         edit_set_status("no file name");
+         return;
+     }
+-    if (buf_save(&E.buf) == 0) {
+-        E.dirty = 0;
+-        edit_set_status("saved %s (%zu bytes)", E.buf.name, gb_len(&E.buf.gb));
++    if (buf_save(b) == 0) {
++        b->dirty = 0;
++        if (b == &E.buf) E.dirty = 0;
++        edit_set_status("saved %s (%zu bytes)", b->name, gb_len(&b->gb));
+     } else {
+         edit_set_status("write error: %s", strerror(errno));
+     }
+ }
+ 
++void cmd_save(void) { save_buffer(&E.buf); }
++
+ static int quit_times = 3;
+ 
+ void cmd_quit(void) {
+@@ -811,6 +871,7 @@ static int leader_handle(int key) {
+ 
+ void edit_handle_key(int key) {
+     if (key != CTRL('Q')) quit_times = 3;
++    if (E.mode == MODE_PROMPT) { prompt_key(key); return; }
+     if (E.mode == MODE_SEARCH) { search_key(key); return; }
+     if (E.mode == MODE_FUZZY) { fuzzy_key(key); return; }
+     if (E.mode == MODE_CMD) { cmd_key(key); return; }
+@@ -930,6 +991,11 @@ void edit_status(void) {
+         snprintf(E.status, sizeof E.status, ":%s", E.cmdq);
+         return;
+     }
++    if (E.mode == MODE_PROMPT) {
++        const char *n = E.blist[pp_idx].name ? E.blist[pp_idx].name : "[no name]";
++        snprintf(E.status, sizeof E.status, "save %s? (y/n)  ", n);
++        return;
++    }
+     if (E.msg[0] && time(NULL) - E.msg_time < 5) {
+         strncpy(E.status, E.msg, sizeof E.status - 1);
+         E.status[sizeof E.status - 1] = '\0';
+@@ -992,6 +1058,7 @@ void edit_init(void) {
+     E.fcount = 0;
+     E.fqlen = 0;
+     E.fsel = 0;
++    pp_idx = (size_t)-1;
+     leader = 0;
+     count_reset();
+ }
+diff --git a/edit.h b/edit.h
+index 63388f2..6e9e8e2 100644
+--- a/edit.h
++++ b/edit.h
+@@ -8,7 +8,7 @@
+ typedef void (*cmd_fn)(void);
+ typedef struct { int key; cmd_fn fn; } KeyBind;
+ 
+-enum { MODE_NORMAL = 0, MODE_INSERT, MODE_SEARCH, MODE_FUZZY, MODE_VISUAL, MODE_CMD };
++enum { MODE_NORMAL = 0, MODE_INSERT, MODE_SEARCH, MODE_FUZZY, MODE_VISUAL, MODE_CMD, MODE_PROMPT };
+ enum { FOCUS_EDIT = 0, FOCUS_TERM };
+ 
+ typedef struct {

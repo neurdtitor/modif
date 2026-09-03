@@ -37,6 +37,7 @@ typedef struct {
     /* fuzzy finder state */
     char **flist;
     size_t fn;
+    size_t fcap;
     int *fscore;
     size_t *fidx;
     size_t fcount;

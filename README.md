@@ -92,6 +92,14 @@ Type `:` then one of:
 
 In the terminal pane, all non-global keys are forwarded to the shell.
 
+### Counts & operators
+
+Motions and editing commands take a leading count, like vim: `10e`, `18w`,
+`3j`, `5x`, `3p`, `2u`, `3n`. `5G` jumps to line 5. `d`/`y` are operators:
+`d2j` deletes 3 lines, `d3w` deletes 3 words, `dG` deletes to the bottom,
+`dd`/`yy` take a line count (`3dd` deletes 3 lines). In visual mode, counts
+extend the selection (`2j`, `10l`). `Esc` cancels a pending count or operator.
+
 ## Explicitly out of scope (for now)
 
 - LSP / DAP

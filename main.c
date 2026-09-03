@@ -12,14 +12,17 @@
 
 /* ------------------------------- append buffer ---------------------------- */
 
-struct abuf { char *b; int len; };
-#define ABUF_INIT { NULL, 0 }
+struct abuf { char *b; int len; int cap; };
+#define ABUF_INIT { NULL, 0, 0 }
 
 static void abAppend(struct abuf *ab, const char *s, int len) {
-    char *n = realloc(ab->b, (size_t)ab->len + (size_t)len);
-    if (!n) return;
-    memcpy(n + ab->len, s, (size_t)len);
-    ab->b = n;
+    if (ab->len + len > ab->cap) {
+        int ncap = ab->cap ? ab->cap * 2 : 4096;
+        while (ncap < ab->len + len) ncap *= 2;
+        ab->b = realloc(ab->b, (size_t)ncap);
+        ab->cap = ncap;
+    }
+    memcpy(ab->b + ab->len, s, (size_t)len);
     ab->len += len;
 }
 
@@ -127,7 +130,7 @@ static void render_line(struct abuf *ab, const char *raw, size_t rawlen,
         int inm = (nm && mi < nm && i >= mstart[mi]) || (i >= hl0 && i < hl1);
         char c = raw[i];
         if (c == '\t') {
-            size_t stop = (col / 8 + 1) * 8;
+            size_t stop = (col / MODIF_TABSTOP + 1) * MODIF_TABSTOP;
             while (col < stop) {
                 if (col >= skip && col < skip + maxc) {
                     if (inm) abAppend(ab, "\x1b[7m", 4);
@@ -239,8 +242,13 @@ static void render_content(struct abuf *ab) {
         if (poptop < 0) poptop = 0;
     }
 
-    size_t rawcap = (size_t)maxc * 8 + 1024;
-    char *raw = malloc(rawcap);
+    size_t need = (size_t)maxc * 8 + 1024;
+    static char *raw;
+    static size_t rawcap;
+    if (need > rawcap) {
+        raw = realloc(raw, need);
+        rawcap = need;
+    }
     for (int y = 0; y < rows; y++) {
         if (E.mode == MODE_FUZZY && y >= poptop && y < poptop + poph) {
             render_fuzzy_line(ab, y, poptop, poph);
@@ -279,7 +287,6 @@ static void render_content(struct abuf *ab) {
         }
         abAppend(ab, "\r\n", 2);
     }
-    free(raw);
 }
 
 static void render_status(struct abuf *ab) {

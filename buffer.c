@@ -36,8 +36,8 @@ static void gb_grow(GapBuf *g, size_t need) {
     while (ncap - len < need) ncap *= 2;
     char *nd = malloc(ncap);
     size_t gs = g->gap_start;
-    memcpy(nd, g->data, gs);
-    memcpy(nd + gs + (ncap - len), g->data + g->gap_end, len - gs);
+    if (gs) memcpy(nd, g->data, gs);
+    if (len - gs) memcpy(nd + gs + (ncap - len), g->data + g->gap_end, len - gs);
     free(g->data);
     g->data = nd;
     g->cap = ncap;

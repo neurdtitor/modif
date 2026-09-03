@@ -198,6 +198,13 @@ void cmd_word_end(void) {
     if (E.cur >= len) return;
     size_t i = E.cur;
     while (i < len && gb_at(&E.buf.gb, i) == ' ') i++;
+    /* already on the last char of a word: step into the next word so a
+     * repeated e keeps advancing (vim behavior) */
+    if (i < len && (i + 1 >= len || gb_at(&E.buf.gb, i + 1) == ' ' ||
+                    gb_at(&E.buf.gb, i + 1) == '\n')) {
+        i++;
+        while (i < len && gb_at(&E.buf.gb, i) == ' ') i++;
+    }
     while (i < len) {
         char c = gb_at(&E.buf.gb, i);
         if (c == ' ' || c == '\n') break;
@@ -267,36 +274,93 @@ void cmd_backspace(void) { ed_backspace(); }
 
 /* ---------------------------- line delete/yank ---------------------------- */
 
-static char pend;
+static size_t ncount;   /* pending count prefix, 0 = none */
+static int op;          /* pending operator: 0 = none, OP_DELETE, OP_YANK */
 
-static void do_yank_line(void) {
+#define OP_DELETE 1
+#define OP_YANK 2
+
+static void count_reset(void) { ncount = 0; op = 0; }
+
+/* Consume the pending count (defaulting to 1) and clear operator state. */
+static size_t count_take(void) {
+    size_t c = ncount ? ncount : 1;
+    count_reset();
+    return c;
+}
+
+void cmd_delete_line(void) { op = OP_DELETE; }
+void cmd_yank_line(void) { op = OP_YANK; }
+
+/* Motions that can be extended into a range by d/y, and linewise ones. */
+static int is_motion(cmd_fn fn) {
+    return fn == cmd_left || fn == cmd_right || fn == cmd_up || fn == cmd_down ||
+           fn == cmd_word_next || fn == cmd_word_prev || fn == cmd_word_end ||
+           fn == cmd_line_start || fn == cmd_line_end || fn == cmd_line_first ||
+           fn == cmd_goto_top || fn == cmd_goto_bottom;
+}
+
+static int is_linewise(cmd_fn fn) {
+    return fn == cmd_up || fn == cmd_down || fn == cmd_goto_top || fn == cmd_goto_bottom;
+}
+
+static int is_repeatable(cmd_fn fn) {
+    return is_motion(fn) || fn == cmd_delete_char || fn == cmd_backspace ||
+           fn == cmd_paste || fn == cmd_paste_before || fn == cmd_undo ||
+           fn == cmd_redo || fn == cmd_search_next || fn == cmd_search_prev ||
+           fn == cmd_half_down || fn == cmd_half_up || fn == cmd_page_up ||
+           fn == cmd_page_down;
+}
+
+/* Apply dd / yy with an optional line count. */
+static void do_line_op(int which) {
+    size_t c = count_take();
     size_t li = cur_line();
-    Line *l = &E.buf.lines[li];
-    size_t s = l->start, n = l->len;
-    size_t len = gb_len(&E.buf.gb);
-    if (s + n < len) n++;
-    yank_set(gb_slice(&E.buf.gb, s, n), n);
+    size_t e = li + c - 1;
+    if (e >= E.buf.nlines) e = E.buf.nlines - 1;
+    Line *l0 = &E.buf.lines[li], *l1 = &E.buf.lines[e];
+    size_t s = l0->start;
+    size_t end = l1->start + l1->len;
+    if (e < E.buf.nlines - 1) end++; /* keep trailing newline */
+    if (which == OP_DELETE) {
+        yank_set(gb_slice(&E.buf.gb, s, end - s), end - s);
+        ed_del_range(s, end - s);
+        E.cur = s;
+    } else {
+        yank_set(gb_slice(&E.buf.gb, s, end - s), end - s);
+    }
 }
 
-static void do_delete_line(void) {
-    size_t li = cur_line();
-    Line *l = &E.buf.lines[li];
-    size_t s = l->start, n = l->len;
-    size_t len = gb_len(&E.buf.gb);
-    if (s + n < len) n++;
-    yank_set(gb_slice(&E.buf.gb, s, n), n);
-    ed_del_range(s, n);
-    E.cur = s;
-}
-
-void cmd_delete_line(void) {
-    if (pend == 'd') { pend = 0; do_delete_line(); }
-    else pend = 'd';
-}
-
-void cmd_yank_line(void) {
-    if (pend == 'y') { pend = 0; do_yank_line(); }
-    else pend = 'y';
+/* Apply d/y over the range swept by a counted motion (e.g. 2dj, d3w, dG). */
+static void do_motion_op(cmd_fn fn) {
+    int which = op; /* count_take() clears op, so capture it first */
+    size_t c = count_take();
+    size_t start = E.cur;
+    if (is_linewise(fn)) start = E.buf.lines[cur_line()].start;
+    for (size_t i = 0; i < c; i++) fn();
+    size_t end = E.cur;
+    size_t lo = start < end ? start : end;
+    size_t hi = start < end ? end : start;
+    size_t s = lo, n = hi - lo;
+    if (is_linewise(fn)) {
+        size_t ll = buf_line_of(&E.buf, lo);
+        size_t lh = buf_line_of(&E.buf, hi);
+        s = E.buf.lines[ll].start;
+        size_t hend = E.buf.lines[lh].start + E.buf.lines[lh].len;
+        if (lh < E.buf.nlines - 1) hend++;
+        n = hend - s;
+    } else if (fn == cmd_word_end && n) {
+        n++; /* de includes the word's final char */
+    }
+    if (!n) return;
+    if (which == OP_DELETE) {
+        yank_set(gb_slice(&E.buf.gb, s, n), n);
+        ed_del_range(s, n);
+        E.cur = s;
+    } else {
+        yank_set(gb_slice(&E.buf.gb, s, n), n);
+        E.cur = start; /* keep cursor at the yank anchor */
+    }
 }
 
 void cmd_paste(void) {
@@ -450,19 +514,30 @@ static void sel_yank(void) {
 }
 
 static void visual_key(int key) {
-    if (key == ESC || key == 'v') { E.mode = MODE_NORMAL; return; }
-    if (key == 'x' || key == 'd') { sel_delete(); return; }
-    if (key == 'y') { sel_yank(); return; }
+    if (key == ESC || key == 'v') { E.mode = MODE_NORMAL; count_reset(); return; }
+    if (key == 'x' || key == 'd') { sel_delete(); count_reset(); return; }
+    if (key == 'y') { sel_yank(); count_reset(); return; }
+    if (key >= '1' && key <= '9') {
+        ncount = ncount * 10 + (size_t)(key - '0');
+        if (ncount > 1000000) ncount = 1000000;
+        return;
+    }
+    if (key == '0' && ncount) { ncount *= 10; return; }
     cmd_fn fn = NULL;
     for (size_t i = 0; i < NORMAL_KEYS_LEN; i++)
         if (normal_keys[i].key == key) { fn = normal_keys[i].fn; break; }
-    if (fn) {
-        int keep = (fn == cmd_delete_line || fn == cmd_yank_line);
+    if (fn == cmd_half_down || fn == cmd_half_up ||
+        fn == cmd_page_down || fn == cmd_page_up) {
+        count_reset();
         fn();
-        if (!keep) pend = 0;
-    } else {
-        pend = 0;
+        return;
     }
+    if (fn && is_motion(fn)) {
+        size_t c = count_take();
+        while (c--) fn();
+        return;
+    }
+    count_reset();
 }
 
 /* ------------------------------ : command mode ---------------------------- */
@@ -661,19 +736,43 @@ void edit_handle_key(int key) {
     }
 
     /* normal mode */
-    if (key == ESC) {
-        pend = 0;
+    if (key == ESC) { count_reset(); return; }
+    if (key >= '1' && key <= '9') {
+        ncount = ncount * 10 + (size_t)(key - '0');
+        if (ncount > 1000000) ncount = 1000000;
         return;
     }
+    if (key == '0' && ncount) { ncount *= 10; return; }
     cmd_fn fn = NULL;
     for (size_t i = 0; i < NORMAL_KEYS_LEN; i++)
         if (normal_keys[i].key == key) { fn = normal_keys[i].fn; break; }
-    if (fn) {
-        int keep = (fn == cmd_delete_line || fn == cmd_yank_line);
-        fn();
-        if (!keep) pend = 0;
-    } else {
-        pend = 0;
+    if (!fn) { count_reset(); return; }
+
+    if (op && is_motion(fn)) { do_motion_op(fn); return; }
+    if (op && fn == cmd_delete_line && op == OP_DELETE) { do_line_op(OP_DELETE); return; }
+    if (op && fn == cmd_yank_line && op == OP_YANK) { do_line_op(OP_YANK); return; }
+    if (op) count_reset(); /* a non-motion cancels the pending operator */
+
+    if (fn == cmd_delete_line) { op = OP_DELETE; return; }
+    if (fn == cmd_yank_line) { op = OP_YANK; return; }
+
+    if (fn == cmd_goto_top || fn == cmd_goto_bottom) {
+        if (ncount) {
+            size_t li = ncount - 1;
+            if (li >= E.buf.nlines) li = E.buf.nlines - 1;
+            E.cur = E.buf.lines[li].start;
+            count_reset();
+        } else {
+            fn();
+        }
+        return;
+    }
+    {
+        size_t c = count_take();
+        if (is_repeatable(fn))
+            while (c--) fn();
+        else
+            fn();
     }
 }
 
@@ -699,7 +798,7 @@ size_t edit_line_col(void) {
     size_t col = 0;
     for (size_t i = 0; i < off && i < E.buf.lines[li].len; i++) {
         if (gb_at(&E.buf.gb, E.buf.lines[li].start + i) == '\t')
-            col = (col / 8 + 1) * 8;
+            col = (col / MODIF_TABSTOP + 1) * MODIF_TABSTOP;
         else col++;
     }
     return col;
@@ -769,11 +868,13 @@ void edit_init(void) {
     E.scur = 0;
     E.flist = NULL;
     E.fn = 0;
+    E.fcap = 0;
     E.fscore = NULL;
     E.fidx = NULL;
     E.fcount = 0;
     E.fqlen = 0;
     E.fsel = 0;
+    count_reset();
 }
 
 void edit_open(const char *path) {
@@ -805,5 +906,5 @@ void edit_open(const char *path) {
     free(ybuf);
     ybuf = NULL;
     ylen = 0;
-    pend = 0;
+    count_reset();
 }

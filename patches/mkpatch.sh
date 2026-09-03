@@ -9,7 +9,9 @@ name="$1"
 cd "$(dirname "$0")/.." || exit 1
 
 out="patches/$name.diff"
-git diff HEAD -- . ':(exclude)*.o' ':(exclude)modif' > "$out"
+# Exclude the patches dir (and build artifacts) so a patch never contains
+# itself or its siblings.
+git diff HEAD -- . ':(exclude)patches/*.diff' ':(exclude)*.o' ':(exclude)modif' > "$out"
 if [ -s "$out" ]; then
     echo "wrote $out ($(wc -l < "$out") lines)"
 else

@@ -593,6 +593,7 @@ static void visual_key(int key) {
 static void buf_sync(void) {
     if (!E.bl->n) return;
     E.bl->bufs[E.bl->cur] = E.buf; /* full copy: content + view + metadata */
+    E.bl->bufs[E.bl->cur].dirty = E.dirty; /* E.dirty is the live dirty flag */
 }
 
 static void buf_load(size_t i) {
@@ -650,8 +651,9 @@ void cmd_colon(void) {
 }
 
 static int any_dirty(void) {
+    if (E.dirty) return 1; /* current buffer's live flag */
     for (size_t i = 0; i < E.bl->n; i++)
-        if (E.bl->bufs[i].dirty) return 1;
+        if (i != E.bl->cur && E.bl->bufs[i].dirty) return 1;
     return 0;
 }
 

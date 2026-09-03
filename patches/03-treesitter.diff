@@ -14,7 +14,7 @@ index d4552c9..786817b 100644
  modif: $(OBJS)
  	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDLIBS)
 diff --git a/edit.c b/edit.c
-index d482f66..9c09a14 100644
+index 691df83..c39ace2 100644
 --- a/edit.c
 +++ b/edit.c
 @@ -9,6 +9,7 @@
@@ -57,15 +57,15 @@ index d482f66..9c09a14 100644
  }
  
  static void ed_backspace(void) {
-@@ -435,6 +440,7 @@ void cmd_paste_before(void) {
-     rec_insert(E.cur, ybuf, ylen);
+@@ -436,6 +441,7 @@ void cmd_paste_before(void) {
      buf_insert(&E.buf, E.cur, ybuf, ylen);
      E.dirty = 1;
+     E.cur += ylen; /* leave the cursor after the pasted text */
 +    hl_dirty(E.hl);
  }
  
  /* --------------------------------- undo ----------------------------------- */
-@@ -450,6 +456,7 @@ void cmd_undo(void) {
+@@ -451,6 +457,7 @@ void cmd_undo(void) {
          E.cur = e->pos + e->len;
      }
      E.dirty = 1;
@@ -73,7 +73,7 @@ index d482f66..9c09a14 100644
      upos--;
  }
  
-@@ -464,6 +471,7 @@ void cmd_redo(void) {
+@@ -465,6 +472,7 @@ void cmd_redo(void) {
          E.cur = e->pos;
      }
      E.dirty = 1;
@@ -81,7 +81,7 @@ index d482f66..9c09a14 100644
      upos++;
  }
  
-@@ -1056,6 +1064,7 @@ void edit_handle_key(int key) {
+@@ -1075,6 +1083,7 @@ void edit_handle_key(int key) {
  }
  
  void edit_after(void) {
@@ -89,7 +89,7 @@ index d482f66..9c09a14 100644
      size_t len = gb_len(&E.buf.gb);
      if (E.cur > len) E.cur = len;
      if (mc_active()) mc_clamp(len);
-@@ -1140,6 +1149,7 @@ void edit_init(void) {
+@@ -1159,6 +1168,7 @@ void edit_init(void) {
      E.bl = malloc(sizeof(BufList));
      bl_init(E.bl);
      mc_init();
@@ -97,7 +97,7 @@ index d482f66..9c09a14 100644
      buf_init(&E.buf);
      buf_build_lines(&E.buf); /* always at least one empty line */
      buf_add(&E.buf);
-@@ -1178,6 +1188,8 @@ void edit_init(void) {
+@@ -1197,6 +1207,8 @@ void edit_init(void) {
  }
  
  void edit_open(const char *path) {
@@ -106,7 +106,7 @@ index d482f66..9c09a14 100644
      /* switch to an already-open buffer with the same name */
      for (size_t i = 0; i < E.bl->n; i++)
          if (E.bl->bufs[i].name && !strcmp(E.bl->bufs[i].name, path)) {
-@@ -1222,6 +1234,7 @@ opened:
+@@ -1238,6 +1250,7 @@ opened:
      E.sqlen = 0;
      E.smatch = (size_t)-1;
      E.sactive = 0;
@@ -115,7 +115,7 @@ index d482f66..9c09a14 100644
      count_reset();
  }
 diff --git a/edit.h b/edit.h
-index 3793650..77d3f12 100644
+index 261a511..9960174 100644
 --- a/edit.h
 +++ b/edit.h
 @@ -5,6 +5,7 @@
@@ -647,7 +647,7 @@ index 0000000..08e9ce6
 +#endif
 \ No newline at end of file
 diff --git a/main.c b/main.c
-index 7e6792d..747eebe 100644
+index 944bea2..09ed90d 100644
 --- a/main.c
 +++ b/main.c
 @@ -10,6 +10,7 @@
@@ -702,7 +702,7 @@ index 7e6792d..747eebe 100644
      while (col < skip + maxc) {
          if (col >= skip && padcur) abAppend(ab, "\x1b[7m", 4);
          abAppend(ab, " ", 1);
-@@ -288,8 +295,20 @@ static void render_content(struct abuf *ab) {
+@@ -289,8 +296,20 @@ static void render_content(struct abuf *ab) {
                          if (p >= ls && p <= le) cc[ncc++] = p - ls;
                      }
                  }

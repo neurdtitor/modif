@@ -26,7 +26,7 @@ index 5803f1b..57732a4 100644
  
  /* Normal-mode bindings. */
 diff --git a/edit.c b/edit.c
-index 865fb82..d482f66 100644
+index c52aa94..20b6bc5 100644
 --- a/edit.c
 +++ b/edit.c
 @@ -8,6 +8,7 @@
@@ -42,8 +42,8 @@ index 865fb82..d482f66 100644
  }
  
 +/* Raw edit primitives exported to mc.c: apply an edit and record it in the
-+ * undo log, without touching the cursor (the multi-cursor feature moves its
-+ * own cursors around these). */
++ * undo log, without touching the cursor (multi-cursor moves its own cursors
++ * around these). */
 +void ed_apply_insert(size_t pos, const char *s, size_t n) {
 +    if (!n) return;
 +    rec_insert(pos, s, n);
@@ -90,7 +90,7 @@ index 865fb82..d482f66 100644
      Line *l = &E.buf.lines[cur_line()];
      E.cur = l->start + l->len;
      E.mode = MODE_INSERT;
-@@ -980,7 +1006,7 @@ void edit_handle_key(int key) {
+@@ -995,7 +1021,7 @@ void edit_handle_key(int key) {
      /* normal mode */
      if (leader_handle(key)) return;
      if (key == LEADER_KEY) { leader = 1; count_reset(); return; }
@@ -99,7 +99,7 @@ index 865fb82..d482f66 100644
      if (key >= '1' && key <= '9') {
          ncount = ncount * 10 + (size_t)(key - '0');
          if (ncount > 1000000) ncount = 1000000;
-@@ -992,6 +1018,13 @@ void edit_handle_key(int key) {
+@@ -1011,6 +1037,13 @@ void edit_handle_key(int key) {
          if (normal_keys[i].key == key) { fn = normal_keys[i].fn; break; }
      if (!fn) { count_reset(); return; }
  
@@ -113,7 +113,7 @@ index 865fb82..d482f66 100644
      if (op && is_motion(fn)) { do_motion_op(fn); return; }
      if (op && fn == cmd_delete_line && op == OP_DELETE) { do_line_op(OP_DELETE); return; }
      if (op && fn == cmd_yank_line && op == OP_YANK) { do_line_op(OP_YANK); return; }
-@@ -1006,6 +1039,8 @@ void edit_handle_key(int key) {
+@@ -1025,6 +1058,8 @@ void edit_handle_key(int key) {
              if (li >= E.buf.nlines) li = E.buf.nlines - 1;
              E.cur = E.buf.lines[li].start;
              count_reset();
@@ -122,7 +122,7 @@ index 865fb82..d482f66 100644
          } else {
              fn();
          }
-@@ -1023,6 +1058,7 @@ void edit_handle_key(int key) {
+@@ -1042,6 +1077,7 @@ void edit_handle_key(int key) {
  void edit_after(void) {
      size_t len = gb_len(&E.buf.gb);
      if (E.cur > len) E.cur = len;
@@ -130,7 +130,7 @@ index 865fb82..d482f66 100644
      size_t content_rows = E.screen_rows > 1 ? (size_t)(E.screen_rows - 1) : 1;
      size_t li = cur_line();
      if (li < E.top) E.top = li;
-@@ -1079,12 +1115,17 @@ void edit_status(void) {
+@@ -1098,12 +1134,17 @@ void edit_status(void) {
      const char *m = E.mode == MODE_INSERT ? "INSERT"
                     : E.mode == MODE_VISUAL ? "VISUAL" : "NORMAL";
      const char *fname = E.buf.name ? E.buf.name : "[no file]";
@@ -149,7 +149,7 @@ index 865fb82..d482f66 100644
  }
  
  void edit_set_status(const char *fmt, ...) {
-@@ -1098,6 +1139,7 @@ void edit_set_status(const char *fmt, ...) {
+@@ -1117,6 +1158,7 @@ void edit_set_status(const char *fmt, ...) {
  void edit_init(void) {
      E.bl = malloc(sizeof(BufList));
      bl_init(E.bl);
@@ -158,7 +158,7 @@ index 865fb82..d482f66 100644
      buf_build_lines(&E.buf); /* always at least one empty line */
      buf_add(&E.buf);
 diff --git a/edit.h b/edit.h
-index 8749cf3..3793650 100644
+index c3b9db6..261a511 100644
 --- a/edit.h
 +++ b/edit.h
 @@ -4,6 +4,7 @@
@@ -188,7 +188,7 @@ index 8749cf3..3793650 100644
  void cmd_switch_focus(void);
  
 diff --git a/main.c b/main.c
-index f504a77..7e6792d 100644
+index 60dcccf..944bea2 100644
 --- a/main.c
 +++ b/main.c
 @@ -9,6 +9,7 @@
@@ -260,7 +260,7 @@ index f504a77..7e6792d 100644
          col++;
      }
  }
-@@ -269,8 +279,17 @@ static void render_content(struct abuf *ab) {
+@@ -270,8 +280,17 @@ static void render_content(struct abuf *ab) {
                      }
                  }
                  buf_line_slice(&E.buf, li, raw, rawcap);

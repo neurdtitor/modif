@@ -7,6 +7,10 @@
 #define MODIF_VERSION "0.0.1"
 #define MODIF_TABSTOP 8
 
+/* Leader key: press it, then one of leader_keys (e.g. <space>f = fuzzy).
+ * Works in normal and visual mode. */
+#define LEADER_KEY ' '
+
 /* Global bindings, active in every mode. */
 static const KeyBind global_keys[] = {
     { CTRL('S'), cmd_save },
@@ -14,6 +18,15 @@ static const KeyBind global_keys[] = {
     { CTRL('F'), cmd_fuzzy },
     { CTRL('T'), cmd_toggle_term },
     { CTRL('W'), cmd_switch_focus },
+};
+
+/* Leader bindings: LEADER_KEY then one of these. */
+static const KeyBind leader_keys[] = {
+    { 'f', cmd_fuzzy },
+    { 't', cmd_toggle_term },
+    { 'w', cmd_switch_focus },
+    { 's', cmd_save },
+    { 'q', cmd_quit },
 };
 
 /* Normal-mode bindings. */
@@ -40,5 +53,6 @@ static const KeyBind normal_keys[] = {
 
 #define NORMAL_KEYS_LEN (sizeof(normal_keys) / sizeof(normal_keys[0]))
 #define GLOBAL_KEYS_LEN (sizeof(global_keys) / sizeof(global_keys[0]))
+#define LEADER_KEYS_LEN (sizeof(leader_keys) / sizeof(leader_keys[0]))
 
 #endif

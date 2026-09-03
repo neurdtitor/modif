@@ -276,6 +276,7 @@ void cmd_backspace(void) { ed_backspace(); }
 
 static size_t ncount;   /* pending count prefix, 0 = none */
 static int op;          /* pending operator: 0 = none, OP_DELETE, OP_YANK */
+static int leader;      /* leader key pressed: 1 = waiting for the next key */
 
 #define OP_DELETE 1
 #define OP_YANK 2
@@ -701,6 +702,17 @@ static void fuzzy_key(int key) {
 
 /* ------------------------------ dispatch / api ---------------------------- */
 
+/* Resolve a key after the leader key. Returns 1 if the key was consumed.
+ * An unmapped key just cancels the pending leader. */
+static int leader_handle(int key) {
+    if (!leader) return 0;
+    leader = 0;
+    count_reset();
+    for (size_t i = 0; i < LEADER_KEYS_LEN; i++)
+        if (leader_keys[i].key == key) { leader_keys[i].fn(); return 1; }
+    return 0;
+}
+
 void edit_handle_key(int key) {
     if (key != CTRL('Q')) quit_times = 3;
     if (E.mode == MODE_SEARCH) { search_key(key); return; }
@@ -709,6 +721,8 @@ void edit_handle_key(int key) {
     if (E.mode == MODE_VISUAL) {
         for (size_t i = 0; i < GLOBAL_KEYS_LEN; i++)
             if (global_keys[i].key == key) { global_keys[i].fn(); return; }
+        if (leader_handle(key)) return;
+        if (key == LEADER_KEY) { leader = 1; count_reset(); return; }
         visual_key(key);
         return;
     }
@@ -736,6 +750,8 @@ void edit_handle_key(int key) {
     }
 
     /* normal mode */
+    if (leader_handle(key)) return;
+    if (key == LEADER_KEY) { leader = 1; count_reset(); return; }
     if (key == ESC) { count_reset(); return; }
     if (key >= '1' && key <= '9') {
         ncount = ncount * 10 + (size_t)(key - '0');
@@ -874,6 +890,7 @@ void edit_init(void) {
     E.fcount = 0;
     E.fqlen = 0;
     E.fsel = 0;
+    leader = 0;
     count_reset();
 }
 
@@ -906,5 +923,6 @@ void edit_open(const char *path) {
     free(ybuf);
     ybuf = NULL;
     ylen = 0;
+    leader = 0;
     count_reset();
 }

@@ -75,6 +75,7 @@ Type `:` then one of:
 | any      | `Ctrl-F`       | fuzzy finder                    |
 | any      | `Ctrl-T`       | toggle terminal pane            |
 | any      | `Ctrl-W`       | switch pane focus               |
+| normal/visual | `<Space>` + key | leader prefix (see below)   |
 | normal   | `h j k l`      | move cursor / arrows            |
 | normal   | `w b e`        | word motions                    |
 | normal   | `0 $ ^`        | line start / end / first word   |
@@ -91,6 +92,23 @@ Type `:` then one of:
 | normal   | `PgUp`/`PgDn`  | page up/down                    |
 
 In the terminal pane, all non-global keys are forwarded to the shell.
+
+### Leader key
+
+In normal/visual mode, `Space` acts as a leader prefix — press it, then one
+of the keys below. The bindings live in `leader_keys[]` in `config.h`, and
+the leader key itself is `LEADER_KEY` (change it to any key, e.g. `\`).
+
+| Leader chord  | Action                          |
+|---------------|---------------------------------|
+| `<Space>f`    | fuzzy finder                    |
+| `<Space>t`    | toggle terminal pane            |
+| `<Space>w`    | switch pane focus               |
+| `<Space>s`    | save                            |
+| `<Space>q`    | quit                            |
+
+A leader followed by an unbound key just cancels the leader; `Esc` also
+cancels it.
 
 ### Counts & operators
 

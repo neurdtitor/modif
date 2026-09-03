@@ -154,9 +154,14 @@ void buf_build_lines(Buffer *b) {
 }
 
 int buf_open(Buffer *b, const char *path) {
+    free(b->name);
+    b->name = strdup(path);
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
-        if (errno == ENOENT) return 0;
+        if (errno == ENOENT) {
+            buf_build_lines(b); /* still need at least one empty line */
+            return 0;
+        }
         return -1;
     }
     off_t sz = lseek(fd, 0, SEEK_END);
@@ -173,8 +178,6 @@ int buf_open(Buffer *b, const char *path) {
     } else {
         close(fd);
     }
-    free(b->name);
-    b->name = strdup(path);
     buf_build_lines(b);
     return 0;
 }

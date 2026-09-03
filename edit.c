@@ -419,6 +419,112 @@ void cmd_search_prev(void) {
     E.sactive = 1;
 }
 
+/* ------------------------------ visual mode ------------------------------- */
+
+void cmd_visual(void) {
+    E.mark = E.cur;
+    E.mode = MODE_VISUAL;
+}
+
+static void sel_bounds(size_t *lo, size_t *hi) {
+    if (E.mark <= E.cur) { *lo = E.mark; *hi = E.cur; }
+    else { *lo = E.cur; *hi = E.mark; }
+}
+
+static void sel_delete(void) {
+    size_t lo, hi;
+    sel_bounds(&lo, &hi);
+    if (hi == lo) { E.mode = MODE_NORMAL; return; }
+    yank_set(gb_slice(&E.buf.gb, lo, hi - lo), hi - lo);
+    ed_del_range(lo, hi - lo);
+    E.cur = lo;
+    E.mode = MODE_NORMAL;
+}
+
+static void sel_yank(void) {
+    size_t lo, hi;
+    sel_bounds(&lo, &hi);
+    if (hi == lo) { E.mode = MODE_NORMAL; return; }
+    yank_set(gb_slice(&E.buf.gb, lo, hi - lo), hi - lo);
+    E.mode = MODE_NORMAL;
+}
+
+static void visual_key(int key) {
+    if (key == ESC || key == 'v') { E.mode = MODE_NORMAL; return; }
+    if (key == 'x' || key == 'd') { sel_delete(); return; }
+    if (key == 'y') { sel_yank(); return; }
+    cmd_fn fn = NULL;
+    for (size_t i = 0; i < NORMAL_KEYS_LEN; i++)
+        if (normal_keys[i].key == key) { fn = normal_keys[i].fn; break; }
+    if (fn) {
+        int keep = (fn == cmd_delete_line || fn == cmd_yank_line);
+        fn();
+        if (!keep) pend = 0;
+    } else {
+        pend = 0;
+    }
+}
+
+/* ------------------------------ : command mode ---------------------------- */
+
+void cmd_colon(void) {
+    E.mode = MODE_CMD;
+    E.cmdlen = 0;
+    E.cmdq[0] = '\0';
+}
+
+static void cmd_execute(void) {
+    char *c = E.cmdq;
+    if (!strcmp(c, "w") || !strcmp(c, "write")) {
+        cmd_save();
+    } else if (!strcmp(c, "q")) {
+        if (E.dirty)
+            edit_set_status("No write since last change (use :q! to quit)");
+        else
+            g_quit = 1;
+    } else if (!strcmp(c, "q!") || !strcmp(c, "quit!")) {
+        g_quit = 1;
+    } else if (!strcmp(c, "wq") || !strcmp(c, "x")) {
+        cmd_save();
+        if (!E.dirty) g_quit = 1;
+    } else if (!strcmp(c, "wq!")) {
+        cmd_save();
+        g_quit = 1;
+    } else if (c[0] != '\0') {
+        edit_set_status("unknown command: %s", c);
+    }
+}
+
+static void cmd_key(int key) {
+    switch (key) {
+    case ESC:
+    case CTRL('G'):
+    case CTRL('C'):
+        E.mode = MODE_NORMAL;
+        break;
+    case CTRL('Q'):
+        E.mode = MODE_NORMAL;
+        cmd_quit();
+        break;
+    case ENTER:
+        cmd_execute();
+        E.mode = MODE_NORMAL;
+        break;
+    case BACKSPACE:
+    case CTRL('H'):
+        if (E.cmdlen) {
+            E.cmdq[--E.cmdlen] = '\0';
+        }
+        break;
+    default:
+        if (key >= 32 && key <= 126 && E.cmdlen < sizeof E.cmdq - 1) {
+            E.cmdq[E.cmdlen++] = (char)key;
+            E.cmdq[E.cmdlen] = '\0';
+        }
+        break;
+    }
+}
+
 /* ----------------------------- file I/O, panes ----------------------------- */
 
 void cmd_save(void) {
@@ -524,6 +630,13 @@ void edit_handle_key(int key) {
     if (key != CTRL('Q')) quit_times = 3;
     if (E.mode == MODE_SEARCH) { search_key(key); return; }
     if (E.mode == MODE_FUZZY) { fuzzy_key(key); return; }
+    if (E.mode == MODE_CMD) { cmd_key(key); return; }
+    if (E.mode == MODE_VISUAL) {
+        for (size_t i = 0; i < GLOBAL_KEYS_LEN; i++)
+            if (global_keys[i].key == key) { global_keys[i].fn(); return; }
+        visual_key(key);
+        return;
+    }
 
     for (size_t i = 0; i < GLOBAL_KEYS_LEN; i++)
         if (global_keys[i].key == key) { global_keys[i].fn(); return; }
@@ -602,6 +715,10 @@ void edit_status(void) {
                  E.fq, E.fcount);
         return;
     }
+    if (E.mode == MODE_CMD) {
+        snprintf(E.status, sizeof E.status, ":%s", E.cmdq);
+        return;
+    }
     if (E.msg[0] && time(NULL) - E.msg_time < 5) {
         strncpy(E.status, E.msg, sizeof E.status - 1);
         E.status[sizeof E.status - 1] = '\0';
@@ -609,7 +726,8 @@ void edit_status(void) {
     }
     size_t li = cur_line();
     size_t col = E.cur - E.buf.lines[li].start;
-    const char *m = E.mode == MODE_INSERT ? "INSERT" : "NORMAL";
+    const char *m = E.mode == MODE_INSERT ? "INSERT"
+                   : E.mode == MODE_VISUAL ? "VISUAL" : "NORMAL";
     const char *fname = E.buf.name ? E.buf.name : "[no file]";
     snprintf(E.status, sizeof E.status,
              "modif %s  %s  [%s]  %zu:%zu/%zu%s%s",
@@ -628,6 +746,7 @@ void edit_set_status(const char *fmt, ...) {
 
 void edit_init(void) {
     buf_init(&E.buf);
+    buf_build_lines(&E.buf); /* always at least one empty line */
     E.mode = MODE_NORMAL;
     E.focus = FOCUS_EDIT;
     E.term_open = 0;
@@ -637,6 +756,9 @@ void edit_init(void) {
     E.cur = 0;
     E.top = 0;
     E.left = 0;
+    E.mark = 0;
+    E.cmdlen = 0;
+    E.cmdq[0] = '\0';
     E.dirty = 0;
     E.status[0] = '\0';
     E.msg[0] = '\0';
@@ -667,6 +789,9 @@ void edit_open(const char *path) {
     E.cur = 0;
     E.top = 0;
     E.left = 0;
+    E.mark = 0;
+    E.cmdlen = 0;
+    E.cmdq[0] = '\0';
     E.dirty = 0;
     E.mode = MODE_NORMAL;
     E.focus = FOCUS_EDIT;

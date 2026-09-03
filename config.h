@@ -32,6 +32,7 @@ static const KeyBind normal_keys[] = {
     { 'p', cmd_paste }, { 'P', cmd_paste_before },
     { 'u', cmd_undo }, { CTRL('R'), cmd_redo },
     { '/', cmd_search }, { 'n', cmd_search_next }, { 'N', cmd_search_prev },
+    { ':', cmd_colon }, { 'v', cmd_visual },
     { CTRL('D'), cmd_half_down }, { CTRL('U'), cmd_half_up },
     { PAGE_UP, cmd_page_up }, { PAGE_DOWN, cmd_page_down },
     { ENTER, cmd_down },

@@ -8,7 +8,7 @@
 typedef void (*cmd_fn)(void);
 typedef struct { int key; cmd_fn fn; } KeyBind;
 
-enum { MODE_NORMAL = 0, MODE_INSERT, MODE_SEARCH, MODE_FUZZY };
+enum { MODE_NORMAL = 0, MODE_INSERT, MODE_SEARCH, MODE_FUZZY, MODE_VISUAL, MODE_CMD };
 enum { FOCUS_EDIT = 0, FOCUS_TERM };
 
 typedef struct {
@@ -21,6 +21,9 @@ typedef struct {
     size_t cur;
     size_t top;
     size_t left;
+    size_t mark;      /* visual-mode selection anchor */
+    char cmdq[128];   /* : command line buffer */
+    size_t cmdlen;
     int dirty;
     char status[160];
     char msg[160];
@@ -79,6 +82,8 @@ void cmd_half_down(void);
 void cmd_half_up(void);
 void cmd_page_up(void);
 void cmd_page_down(void);
+void cmd_visual(void);
+void cmd_colon(void);
 void cmd_save(void);
 void cmd_quit(void);
 void cmd_fuzzy(void);

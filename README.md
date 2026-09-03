@@ -19,14 +19,14 @@ and recompile. If you can't read the whole core in an evening, it's too big.
 
 ## Status
 
-v0 works: gap-buffer editing, modal insert/normal, search, fuzzy finder,
-and an embedded terminal pane. Still rough around the edges — no syntax
-highlighting, no undo tree.
+v0 works: gap-buffer editing, modal insert/normal/visual, `:w`/`:q`
+commands, search, fuzzy finder, and an embedded terminal pane. Still rough
+around the edges — no syntax highlighting, no undo tree.
 
 ## What's here (v0)
 
-- **Core editing**: gap buffer, insert/normal modes, motions and editing
-  commands, linear undo/redo, yank/paste
+- **Core editing**: gap buffer, insert/normal/visual modes, motions and
+  editing commands, linear undo/redo, yank/paste
 - **`config.h`-based keybindings**: a plain array of `{key, function}`
   entries — no keybinding DSL
 - **File I/O**: open, save, dirty-buffer warning on quit
@@ -42,6 +42,30 @@ highlighting, no undo tree.
 - **Patch-friendly layout**: `buffer.c`, `terminal.c`, `input.c`, `pty.c`,
   `fuzzy.c`, `config.h` — small, single-purpose files
 
+## Modes
+
+The status bar always shows the current mode.
+
+| Mode     | Entered with | Notes                                  |
+|----------|--------------|----------------------------------------|
+| NORMAL   | `Esc`        | default; motions and editing commands  |
+| INSERT   | `i a I A o O`| type to insert text, `Esc` to leave    |
+| VISUAL   | `v`          | move to extend the selection; `x`/`d` deletes it, `y` yanks it, `Esc` cancels |
+| `:`      | `:`          | command line (see below)               |
+
+## Commands
+
+Type `:` then one of:
+
+| Command | Action                          |
+|---------|---------------------------------|
+| `:w`    | save                            |
+| `:q`    | quit (refuses when modified)    |
+| `:q!`   | quit without saving             |
+| `:wq` / `:x` | save and quit             |
+
+`Esc` cancels a command line.
+
 ## Keybindings
 
 | Mode     | Key            | Action                          |
@@ -56,11 +80,13 @@ highlighting, no undo tree.
 | normal   | `0 $ ^`        | line start / end / first word   |
 | normal   | `g` / `G`      | top / bottom of file            |
 | normal   | `i a I A o O`  | enter insert mode               |
+| normal   | `v`            | enter visual mode               |
 | normal   | `x` / `X`      | delete char / backspace         |
 | normal   | `dd` / `yy`    | delete line / yank line         |
 | normal   | `p` / `P`      | paste after / before            |
 | normal   | `u` / `Ctrl-R` | undo / redo                     |
 | normal   | `/` `n` `N`    | search, next, prev              |
+| normal   | `:`            | command line                    |
 | normal   | `Ctrl-D/U`     | half page down/up               |
 | normal   | `PgUp`/`PgDn`  | page up/down                    |
 

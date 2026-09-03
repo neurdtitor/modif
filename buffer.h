@@ -38,6 +38,7 @@ char *gb_slice(GapBuf *g, size_t pos, size_t n);
 
 void buf_init(Buffer *b);
 void buf_free(Buffer *b);
+void buf_build_lines(Buffer *b);
 int buf_open(Buffer *b, const char *path);
 int buf_save(Buffer *b);
 void buf_insert(Buffer *b, size_t pos, const char *s, size_t n);

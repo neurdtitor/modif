@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <poll.h>
+#include <sys/select.h>
 #include <errno.h>
 #include "terminal.h"
 #include "input.h"
@@ -25,15 +25,14 @@ static void abAppend(struct abuf *ab, const char *s, int len) {
 
 static void abFree(struct abuf *ab) { free(ab->b); }
 
+/* Write the whole frame. stdout is blocking, so this completes once the
+ * terminal drains; a paused terminal is the only thing that stalls here,
+ * which is fine since no input is expected then. */
 static void write_all(int fd, const char *buf, size_t n) {
     while (n > 0) {
         ssize_t r = write(fd, buf, n);
         if (r < 0) {
             if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                usleep(1000); /* terminal draining; retry shortly */
-                continue;
-            }
             return;
         }
         buf += r;
@@ -110,9 +109,11 @@ static void ab_bg(struct abuf *ab, int idx) {
 }
 
 /* Render a line's visible window [skip, skip+maxc), expanding tabs and
- * highlighting occurrences of q (reverse video). */
+ * highlighting occurrences of q and the selection range hl0..hl1
+ * (raw char indices within the line) in reverse video. */
 static void render_line(struct abuf *ab, const char *raw, size_t rawlen,
-                        size_t skip, size_t maxc, const char *q, size_t qlen) {
+                        size_t skip, size_t maxc, const char *q, size_t qlen,
+                        size_t hl0, size_t hl1) {
     size_t col = 0;
     size_t mstart[32];
     size_t nm = 0;
@@ -123,7 +124,7 @@ static void render_line(struct abuf *ab, const char *raw, size_t rawlen,
     size_t mi = 0;
     for (size_t i = 0; i < rawlen; i++) {
         if (nm && mi < nm && i == mstart[mi] + qlen) mi++;
-        int inm = (nm && mi < nm && i >= mstart[mi]);
+        int inm = (nm && mi < nm && i >= mstart[mi]) || (i >= hl0 && i < hl1);
         char c = raw[i];
         if (c == '\t') {
             size_t stop = (col / 8 + 1) * 8;
@@ -223,6 +224,11 @@ static void render_content(struct abuf *ab) {
     int skip = (int)E.left;
     const char *q = (E.sqlen && (E.sactive || E.mode == MODE_SEARCH)) ? E.sq : NULL;
     size_t qlen = q ? E.sqlen : 0;
+    size_t s0 = SIZE_MAX, s1 = 0;
+    if (E.mode == MODE_VISUAL) {
+        if (E.mark <= E.cur) { s0 = E.mark; s1 = E.cur; }
+        else { s0 = E.cur; s1 = E.mark; }
+    }
 
     int poptop = rows / 3;
     int poph = 0;
@@ -245,9 +251,18 @@ static void render_content(struct abuf *ab) {
                 int n = maxc - 1;
                 while (n-- > 0) abAppend(ab, " ", 1);
             } else {
+                size_t hl0 = SIZE_MAX, hl1 = 0;
+                if (E.mode == MODE_VISUAL) {
+                    Line *l = &E.buf.lines[li];
+                    size_t ls = l->start, le = l->start + l->len;
+                    if (s1 > ls && s0 < le) {
+                        hl0 = s0 > ls ? s0 - ls : 0;
+                        hl1 = s1 < le ? s1 - ls : l->len;
+                    }
+                }
                 buf_line_slice(&E.buf, li, raw, rawcap);
                 render_line(ab, raw, strlen(raw), (size_t)skip, (size_t)maxc,
-                            q, qlen);
+                            q, qlen, hl0, hl1);
             }
             abAppend(ab, "\x1b[0K", 4);
         }
@@ -286,6 +301,10 @@ static void place_cursor(struct abuf *ab) {
         col = E.ed_cols + 1 + term.cx;
         if (col >= E.screen_cols) col = E.screen_cols - 1;
         if (row >= E.screen_rows - 1) row = E.screen_rows - 2;
+    } else if (E.mode == MODE_CMD) {
+        row = E.screen_rows - 1;
+        col = 1 + (int)E.cmdlen;
+        if (col >= E.screen_cols) col = E.screen_cols - 1;
     } else if (E.mode == MODE_FUZZY) {
         int rows = E.screen_rows - 1;
         int poptop = rows / 3;
@@ -353,8 +372,11 @@ again:;
         int key = kb_decode(inq + off, inqlen - off, &consumed);
         if (key == 0) {
             if (inqlen - off == 1 && inq[off] == ESC) {
-                struct pollfd p = { STDIN_FILENO, POLLIN, 0 };
-                if (poll(&p, 1, 8) > 0) {
+                fd_set rfds;
+                struct timeval tv = { 0, 8000 };
+                FD_ZERO(&rfds);
+                FD_SET(STDIN_FILENO, &rfds);
+                if (select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv) > 0) {
                     memmove(inq, inq + off, inqlen - off);
                     inqlen -= off;
                     goto again;
@@ -400,26 +422,23 @@ int main(int argc, char **argv) {
         edit_after();
         render();
 
-        struct pollfd fds[2];
-        fds[0].fd = STDIN_FILENO;
-        fds[0].events = POLLIN;
-        fds[0].revents = 0;
-        int nf = 1;
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(STDIN_FILENO, &rfds);
+        int maxfd = STDIN_FILENO;
         if (term_alive) {
-            fds[1].fd = term.master;
-            fds[1].events = POLLIN;
-            fds[1].revents = 0;
-            nf = 2;
+            FD_SET(term.master, &rfds);
+            if (term.master > maxfd) maxfd = term.master;
         }
-        int pr = poll(fds, nf, -1);
+        int pr = select(maxfd + 1, &rfds, NULL, NULL, NULL);
         if (pr < 0) {
             if (errno == EINTR) continue;
             break;
         }
-        if (nf == 2 && (fds[1].revents & (POLLIN | POLLHUP))) {
+        if (term_alive && FD_ISSET(term.master, &rfds)) {
             char tbuf[8192];
             ssize_t n = read(term.master, tbuf, sizeof tbuf);
-            if (n > 0) pty_feed(&term, tbuf, (size_t)n);
+            if (n > 0) { pty_feed(&term, tbuf, (size_t)n); }
             else if (n == 0) {
                 pty_close(&term);
                 term_alive = 0;
@@ -429,7 +448,7 @@ int main(int argc, char **argv) {
                 edit_set_status("terminal exited");
             }
         }
-        if (fds[0].revents & POLLIN) process_stdin();
+        if (FD_ISSET(STDIN_FILENO, &rfds)) process_stdin();
     }
     term_restore();
     return 0;

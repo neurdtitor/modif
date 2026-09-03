@@ -160,8 +160,15 @@ dependencies beyond libc.
 
 ## Patches
 
-Once patches exist, they'll live under `patches/` as plain `.diff` files,
-one feature per patch, applied with `patch -p1 < patches/foo.diff`.
+Features live in `patches/<name>.diff`, one feature per file, applied to the
+pristine base (`HEAD`) with `git apply`. The base is never committed with
+patches applied — the suckless model.
+
+    ./patches/apply.sh && make   # apply all + rebuild (idempotent)
+    ./patches/remove.sh <name>   # un-apply one patch
+    ./patches/mkpatch.sh <name>  # capture current edits as a new patch
+
+Full workflow and conventions: see `patches/README.md`.
 
 ## License
 

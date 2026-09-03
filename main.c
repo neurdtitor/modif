@@ -276,7 +276,7 @@ static void render_content(struct abuf *ab) {
         }
         if (E.term_open) {
             abAppend(ab, "\x1b[7m", 4);
-            abAppend(ab, "\xe2\x94\x82", 3);
+            abAppend(ab, "\x1b(0x\x1b(B", 7); /* VT100 line-drawing: vertical bar */
             abAppend(ab, "\x1b[0m", 4);
             if (term_alive && y < term.rows) {
                 render_term_row(ab, y);

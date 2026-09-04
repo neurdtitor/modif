@@ -20,12 +20,13 @@ and recompile. If you can't read the whole core in an evening, it's too big.
 ## Status
 
 v0 works: gap-buffer editing, modal insert/normal/visual, multiple buffers,
-`:w`/`:q` commands, search, fuzzy finder, an embedded terminal pane, and a
-system clipboard. Buffer management lives in the core (per-buffer view state,
-a buffer list, `:bn`/`:bp`/`:ls`), so patches build on a stable foundation
-instead of re-homing core state. Features that aren't core — multi-buffer
-extras, multiple cursors, tree-sitter syntax highlighting — ship as ordered
-patches (see below). The core stays deliberately small.
+`:w`/`:q` commands, regex search, fuzzy finder, an embedded terminal pane,
+and a system clipboard. Buffer management and the regex engine live in the
+core: the buffer list + per-buffer view state (`:bn`/`:bp`/`:ls`) is the
+foundation patches build on, and a small Thompson-NFA regex engine powers
+`/` search and the syntax-highlighting framework. Features that aren't core
+— multi-buffer extras, multiple cursors, syntax highlighting *rules* — ship
+as ordered patches (see below). The core stays deliberately small.
 
 ## What's here (v0)
 
@@ -35,6 +36,10 @@ patches (see below). The core stays deliberately small.
   state; a buffer list owns lifecycle (`buf_add`/`buf_switch`); switching
   resets the single global undo log. Basic commands `:bn`/`:bp`/`:ls` and
   `H`/`L` are bound in the base
+- **Regex engine**: a linear-time Thompson-NFA matcher (`regex.c`, ~400
+  lines, no backtracking) covering literals, `.`, `^`/`$`/`\b`, char
+  classes, escapes, `*`/`+`/`?`, groups, and alternation. `/` search is
+  regex; the syntax-highlighting framework is built on it
 - **`config.h`-based keybindings**: a plain array of `{key, function}`
   entries — no keybinding DSL
 - **File I/O**: open, save, dirty-buffer warning on quit (across all buffers)
@@ -49,8 +54,13 @@ patches (see below). The core stays deliberately small.
   fzf-style scoring, launched as a popup
 - **System clipboard**: `pbcopy`/`pbpaste` (macOS) or `wl-copy`/`xclip`/
   `xsel` elsewhere, bound to `<Space>Y` / `<Space>P`
+- **Highlight framework**: language-agnostic core (`highlight.c`) — `Lang`
+  / `HLRule` tables, a registry, and a per-line block-state machine for
+  multi-line constructs. The base ships **no languages**; each is a small
+  self-registering file (see the patches)
 - **Patch-friendly layout**: `buffer.c`, `terminal.c`, `input.c`, `pty.c`,
-  `fuzzy.c`, `clipboard.c`, `config.h` — small, single-purpose files
+  `fuzzy.c`, `clipboard.c`, `regex.c`, `highlight.c`, `config.h` — small,
+  single-purpose files
 
 ## Modes
 
@@ -148,11 +158,12 @@ the buffer list and per-buffer view state are the foundation patches build on.
 | Component      | Approach                                            |
 |-----------------|------------------------------------------------------|
 | Buffer          | Gap buffer + buffer list with per-buffer view state   |
+| Regex           | Thompson NFA (`regex.c`), linear-time, no backtracking|
 | Rendering       | Raw terminal mode, direct ANSI escapes                |
 | Embedded shell  | `forkpty()` + minimal VT100/ANSI subset (à la `st`)   |
 | Fuzzy matching  | Subsequence match + fzf-style scoring                 |
 | Config          | `config.h`, recompiled — no runtime config language   |
-| Syntax (patch)  | tree-sitter via `dlopen`; colors from `queries/<lang>/highlights.scm` |
+| Syntax (patch)  | regex rules per language (`hl_lang_*.c`), engine in base |
 | Extensibility   | Source patches (`.diff`), applied and recompiled      |
 
 ## Prior art / inspiration
@@ -171,8 +182,8 @@ make
 ```
 
 No build system beyond a single Makefile. No package manager, no vendored
-dependencies beyond libc (the optional tree-sitter patch vendors
-`tree_sitter/api.h` for ABI stability but loads the runtime with `dlopen`).
+dependencies beyond libc. The Makefile auto-compiles every `*.c` in the tree,
+so a language highlighter is dropped in as a new file with no other changes.
 
 ## Patches
 
@@ -180,20 +191,22 @@ Features live in `patches/<name>.diff`, one feature per file, applied to the
 pristine base (`HEAD`) with `git apply`. The base is never committed with
 patches applied — the suckless model.
 
-The patches are an explicit, ordered chain. The base owns buffer lifecycle
-and per-buffer view state, so patches never re-home core state:
+The patches are an explicit, ordered chain. The base owns buffer lifecycle,
+per-buffer view state, the regex engine, and the highlighting framework, so
+patches never re-home core state:
 
-    HEAD (pristine base; buffer list + :bn/:bp/:ls in core)
+    HEAD (pristine base; buffer list + regex + highlight core)
       └─ 01-buffers.diff         :new/:e/:bd, quit-all prompts, buffer fuzzy
            └─ 02-multicursor.diff     multiple cursors
-                └─ 03-treesitter.diff     tree-sitter syntax highlighting
+                └─ 03-regex-hl.diff    C + Python syntax rules
 
 Two rules keep the set robust: **undo is linear and frozen in the base** (no
 patch ever redefines it), and **each feature owns its state in its own
-file** (`MCState` in `mc.c`, `HLState` in `highlight.c`) — patches add a
-struct pointer to the Editor, never fields. `01` is now a thin layer of
-commands and prompts: the buffer machinery it used to carry lives in the
-base, so `02` and `03` build on a stable core.
+file** (`MCState` in `mc.c`, language tables in `hl_lang_*.c`) — patches add
+a struct pointer to the Editor, never fields. `01` is a thin layer of
+commands and prompts, and a language is a single self-registering
+`hl_lang_<name>.c` (a constructor calls `hl_register()`), so per-language
+patches never touch a shared file and apply in any order.
 
     ./patches/apply.sh && make   # apply all + rebuild (idempotent)
     ./patches/remove.sh <name>   # un-apply one patch

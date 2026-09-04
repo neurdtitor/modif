@@ -15,12 +15,31 @@ patch layers one optional feature on top.
         └─ 01-buffers.diff       :new/:e/:bd, quit-all prompts, buffer fuzzy
              └─ 02-multicursor.diff   multiple cursors (builds on the base's
              │                        buffer list and per-buffer view state)
-                  └─ 03-treesitter.diff   tree-sitter syntax highlighting
+                  └─ 03-regex-hl.diff   C + Python syntax rules
 
   The buffer machinery that used to live in `01` (the `BufList`, per-buffer
   view state, `buf_sync`/`buf_load`, undo reset on switch, `:bn`/`:bp`/`:ls`)
-  is **core now**, so `01` is a thin layer of commands and prompts. `02` and
-  `03` depend on the base's buffer support rather than on `01`'s internals.
+  is **core now**, so `01` is a thin layer of commands and prompts. The regex
+  engine and the highlighting framework are core too; `03` only carries
+  per-language *rules*.
+
+### Language patches don't collide
+
+Syntax highlighting is a **data patch**: the base's `highlight.c` defines
+`HLRule`/`Lang` and a registry, and each language is a single
+self-registering file:
+
+    // hl_lang_rust.c
+    #include "highlight.h"
+    static const HLRule rust_rules[] = { ... };
+    static const Lang lang_rust = { "rust", { "rs" }, rust_rules, ... };
+    __attribute__((constructor)) static void reg(void) { hl_register(&lang_rust); }
+
+A language patch is exactly one new file (no edits to `edit.c`/`main.c`/the
+Makefile — the wildcard builds it), so any number of language patches apply
+independently and in any order. Multi-line constructs (block comments,
+triple-quoted strings) use `state_on`/`state_off` bits on a rule and the
+language's `block_color`.
 - A patch is generated with `git diff HEAD` against a clean tree, so it
   contains exactly one feature and nothing else. Build artifacts (`.o`,
   the binary) are never included.
@@ -52,9 +71,9 @@ rewrite undo — and once merged, nothing else redefines it again.
 
 A patch that adds state adds a **struct owned by its own file**, and the
 Editor only holds a pointer to it — it does not bolt fields onto `Editor`.
-`02-multicursor` adds `MCState` in `mc.c`; `03-treesitter` adds `HLState` in
-`highlight.c`. (`01-buffers` needs no struct: the buffer list it used to
-carry is base.) This keeps patches isolated and reviewable.
+`02-multicursor` adds `MCState` in `mc.c`. (`01-buffers` needs no struct: the
+buffer list it used to carry is base; language patches add only static `Lang`
+tables.) This keeps patches isolated and reviewable.
 
 ## Workflow
 

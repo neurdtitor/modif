@@ -2,7 +2,9 @@ CC      ?= cc
 CFLAGS  ?= -O2 -std=c11 -Wall -Wextra
 LDLIBS   = $(shell uname -s | grep -q Linux && echo -lutil)
 
-OBJS = main.o buffer.o terminal.o input.o edit.o fuzzy.o pty.o clipboard.o
+# Auto-discover sources: language highlighters are just dropped in as
+# hl_*.c files and are picked up with no Makefile edits.
+OBJS = $(patsubst %.c,%.o,$(wildcard *.c))
 
 modif: $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDLIBS)

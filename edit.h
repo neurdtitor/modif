@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <time.h>
 #include "buffer.h"
+#include "regex.h"
+#include "highlight.h"
 
 typedef void (*cmd_fn)(void);
 typedef struct { int key; cmd_fn fn; } KeyBind;
@@ -33,8 +35,11 @@ typedef struct {
     char sq[256];
     size_t sqlen;
     size_t smatch;
+    size_t smlen;   /* length of the last regex search match */
     int sactive;
     size_t scur;
+    Regex *sqre;    /* compiled search pattern, NULL when no query */
+    HL *hl;         /* per-buffer syntax highlighting (highlight.c) */
     /* fuzzy finder state */
     char **flist;
     size_t fn;

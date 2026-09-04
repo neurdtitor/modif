@@ -95,19 +95,24 @@ static void rec_delete(size_t pos, const char *s, size_t n) {
 }
 
 static void ed_insert_chars(size_t pos, const char *s, size_t n) {
+    if (!n) return;
+    size_t li = buf_line_of(&E.buf, pos);
     rec_insert(pos, s, n);
     buf_insert(&E.buf, pos, s, n);
     E.dirty = 1;
     E.cur = pos + n;
+    if (E.hl) hl_dirty(E.hl, li);
 }
 
 static void ed_del_range(size_t pos, size_t n) {
     if (!n) return;
+    size_t li = buf_line_of(&E.buf, pos);
     char *s = gb_slice(&E.buf.gb, pos, n);
     rec_delete(pos, s, n);
     free(s);
     buf_delete(&E.buf, pos, n);
     E.dirty = 1;
+    if (E.hl) hl_dirty(E.hl, li);
 }
 
 static void ed_backspace(void) {
@@ -406,10 +411,12 @@ void cmd_paste(void) {
 }
 void cmd_paste_before(void) {
     if (!ylen) return;
+    size_t li = buf_line_of(&E.buf, E.cur);
     rec_insert(E.cur, ybuf, ylen);
     buf_insert(&E.buf, E.cur, ybuf, ylen);
     E.dirty = 1;
     E.cur += ylen; /* leave the cursor after the pasted text */
+    if (E.hl) hl_dirty(E.hl, li);
 }
 
 /* --------------------------------- undo ----------------------------------- */
@@ -417,6 +424,7 @@ void cmd_paste_before(void) {
 void cmd_undo(void) {
     if (!upos) return;
     UEntry *e = &ustack[upos - 1];
+    size_t li = buf_line_of(&E.buf, e->pos);
     if (e->type == 0) {
         buf_delete(&E.buf, e->pos, e->len);
         E.cur = e->pos;
@@ -426,11 +434,13 @@ void cmd_undo(void) {
     }
     E.dirty = 1;
     upos--;
+    if (E.hl) hl_dirty(E.hl, li);
 }
 
 void cmd_redo(void) {
     if (upos >= un) return;
     UEntry *e = &ustack[upos];
+    size_t li = buf_line_of(&E.buf, e->pos);
     if (e->type == 0) {
         buf_insert(&E.buf, e->pos, e->data, e->len);
         E.cur = e->pos + e->len;
@@ -440,9 +450,19 @@ void cmd_redo(void) {
     }
     E.dirty = 1;
     upos++;
+    if (E.hl) hl_dirty(E.hl, li);
 }
 
 /* --------------------------------- search --------------------------------- */
+
+/* Search uses the base regex engine: the query is compiled once per change
+ * and matched against a contiguous copy of the buffer (the gap buffer is not
+ * contiguous). Anchors (^, $, \b) are relative to the whole buffer. */
+
+static char *buf_copy(size_t *len) {
+    *len = gb_len(&E.buf.gb);
+    return gb_slice(&E.buf.gb, 0, *len);
+}
 
 void cmd_search(void) {
     E.scur = E.cur;
@@ -450,7 +470,16 @@ void cmd_search(void) {
     E.sq[0] = '\0';
     E.smatch = (size_t)-1;
     E.sactive = 0;
+    if (E.sqre) { re_free(E.sqre); E.sqre = NULL; }
     E.mode = MODE_SEARCH;
+}
+
+static void search_recompile(void) {
+    if (E.sqre) { re_free(E.sqre); E.sqre = NULL; }
+    if (E.sqlen) {
+        E.sqre = re_compile(E.sq);
+        if (!E.sqre) edit_set_status("bad pattern: %s", re_error());
+    }
 }
 
 static void search_update(void) {
@@ -459,10 +488,15 @@ static void search_update(void) {
         E.cur = E.scur;
         return;
     }
-    E.smatch = gb_find(&E.buf.gb, E.sq, E.sqlen, E.scur);
-    if (E.smatch == (size_t)-1) E.smatch = gb_find(&E.buf.gb, E.sq, E.sqlen, 0);
-    if (E.smatch != (size_t)-1) E.cur = E.smatch;
-    else edit_set_status("no match");
+    if (!E.sqre) return;
+    size_t len;
+    char *s = buf_copy(&len);
+    size_t m0, m1;
+    int ok = re_match(E.sqre, s, len, E.scur, &m0, &m1);
+    if (!ok) ok = re_match(E.sqre, s, len, 0, &m0, &m1);
+    free(s);
+    if (ok) { E.smatch = m0; E.smlen = m1 - m0; E.cur = m0; }
+    else { E.smatch = (size_t)-1; edit_set_status("no match"); }
 }
 
 static void search_key(int key) {
@@ -479,6 +513,7 @@ static void search_key(int key) {
         E.sq[0] = '\0';
         E.sactive = 0;
         E.smatch = (size_t)-1;
+        if (E.sqre) { re_free(E.sqre); E.sqre = NULL; }
         E.mode = MODE_NORMAL;
         break;
     case ENTER:
@@ -489,6 +524,7 @@ static void search_key(int key) {
     case CTRL('H'):
         if (E.sqlen) {
             E.sq[--E.sqlen] = '\0';
+            search_recompile();
             search_update();
         }
         break;
@@ -496,6 +532,7 @@ static void search_key(int key) {
         if (key >= 32 && key <= 126 && E.sqlen < sizeof E.sq - 1) {
             E.sq[E.sqlen++] = (char)key;
             E.sq[E.sqlen] = '\0';
+            search_recompile();
             search_update();
         }
         break;
@@ -503,21 +540,34 @@ static void search_key(int key) {
 }
 
 void cmd_search_next(void) {
-    if (!E.sqlen) return;
-    size_t from = (E.smatch != (size_t)-1) ? E.smatch + E.sqlen : E.cur;
-    E.smatch = gb_find(&E.buf.gb, E.sq, E.sqlen, from);
-    if (E.smatch == (size_t)-1) E.smatch = gb_find(&E.buf.gb, E.sq, E.sqlen, 0);
-    if (E.smatch != (size_t)-1) E.cur = E.smatch;
+    if (!E.sqlen || !E.sqre) return;
+    size_t len;
+    char *s = buf_copy(&len);
+    size_t from = (E.smatch != (size_t)-1)
+                      ? E.smatch + (E.smlen ? E.smlen : 1)
+                      : E.cur;
+    size_t m0, m1;
+    int ok = re_match(E.sqre, s, len, from, &m0, &m1);
+    if (!ok) ok = re_match(E.sqre, s, len, 0, &m0, &m1);
+    free(s);
+    if (ok) { E.smatch = m0; E.smlen = m1 - m0; E.cur = m0; }
     E.sactive = 1;
 }
 
 void cmd_search_prev(void) {
-    if (!E.sqlen) return;
-    size_t before = (E.smatch != (size_t)-1) ? E.smatch : E.cur + E.sqlen;
-    E.smatch = gb_rfind(&E.buf.gb, E.sq, E.sqlen, before);
-    if (E.smatch == (size_t)-1)
-        E.smatch = gb_rfind(&E.buf.gb, E.sq, E.sqlen, gb_len(&E.buf.gb) + 1);
-    if (E.smatch != (size_t)-1) E.cur = E.smatch;
+    if (!E.sqlen || !E.sqre) return;
+    size_t len;
+    char *s = buf_copy(&len);
+    size_t limit = (E.smatch != (size_t)-1) ? E.smatch : len + 1;
+    size_t from = 0, last0 = (size_t)-1, last1 = 0, m0, m1;
+    while (re_match(E.sqre, s, len, from, &m0, &m1)) {
+        if (m0 >= limit) break;
+        last0 = m0;
+        last1 = m1;
+        from = m1 > m0 ? m1 : m0 + 1;
+    }
+    free(s);
+    if (last0 != (size_t)-1) { E.smatch = last0; E.smlen = last1 - last0; E.cur = last0; }
     E.sactive = 1;
 }
 
@@ -610,6 +660,7 @@ static void buf_load(size_t i) {
     E.mode = MODE_NORMAL;
     leader = 0;
     count_reset();
+    if (E.hl) hl_bind(E.hl, &E.buf); /* pick a language for the new buffer */
 }
 
 static void buf_add(Buffer *nb) {
@@ -983,6 +1034,7 @@ void edit_set_status(const char *fmt, ...) {
 void edit_init(void) {
     E.bl = malloc(sizeof(BufList));
     bl_init(E.bl);
+    E.hl = hl_new();
     buf_init(&E.buf);
     buf_build_lines(&E.buf); /* always at least one empty line */
     buf_add(&E.buf);
@@ -1004,8 +1056,10 @@ void edit_init(void) {
     E.msg_time = 0;
     E.sqlen = 0;
     E.smatch = (size_t)-1;
+    E.smlen = 0;
     E.sactive = 0;
     E.scur = 0;
+    E.sqre = NULL;
     E.flist = NULL;
     E.fn = 0;
     E.fcap = 0;
@@ -1059,7 +1113,9 @@ opened:
     E.term_open = 0;
     E.sqlen = 0;
     E.smatch = (size_t)-1;
+    E.smlen = 0;
     E.sactive = 0;
+    if (E.sqre) { re_free(E.sqre); E.sqre = NULL; }
     leader = 0;
     count_reset();
 }

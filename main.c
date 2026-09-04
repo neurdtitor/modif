@@ -112,29 +112,41 @@ static void ab_bg(struct abuf *ab, int idx) {
 }
 
 /* Render a line's visible window [skip, skip+maxc), expanding tabs and
- * highlighting occurrences of q and the selection range hl0..hl1
- * (raw char indices within the line) in reverse video. */
+ * highlighting regex search matches and the selection range hl0..hl1 (raw
+ * char indices within the line) in reverse video, plus syntax colors from
+ * spans (also raw char indices). */
 static void render_line(struct abuf *ab, const char *raw, size_t rawlen,
-                        size_t skip, size_t maxc, const char *q, size_t qlen,
-                        size_t hl0, size_t hl1) {
+                        size_t skip, size_t maxc, Regex *qre,
+                        size_t hl0, size_t hl1,
+                        const HLSpan *spans, size_t nspans) {
     size_t col = 0;
-    size_t mstart[32];
-    size_t nm = 0;
-    if (q && qlen) {
-        for (size_t i = 0; i + qlen <= rawlen && nm < 32; i++)
-            if (!memcmp(raw + i, q, qlen)) mstart[nm++] = i;
+    size_t ms[32], me[32], nm = 0;
+    if (qre) {
+        size_t from = 0, m0, m1;
+        while (nm < 32 && re_match(qre, raw, rawlen, from, &m0, &m1)) {
+            ms[nm] = m0;
+            me[nm] = m1;
+            nm++;
+            if (m1 > m0) from = m1;
+            else if (m1 < rawlen) from = m1 + 1;
+            else break;
+        }
     }
-    size_t mi = 0;
+    size_t mi = 0, si = 0;
     for (size_t i = 0; i < rawlen; i++) {
-        if (nm && mi < nm && i == mstart[mi] + qlen) mi++;
-        int inm = (nm && mi < nm && i >= mstart[mi]) || (i >= hl0 && i < hl1);
+        while (mi < nm && i >= me[mi]) mi++;
+        while (si < nspans && i >= spans[si].end) si++;
+        int inm = (mi < nm && i >= ms[mi] && i < me[mi]) || (i >= hl0 && i < hl1);
+        int color = (si < nspans && i >= spans[si].start) ? spans[si].color : -1;
         char c = raw[i];
         if (c == '\t') {
             size_t stop = (col / MODIF_TABSTOP + 1) * MODIF_TABSTOP;
             while (col < stop) {
                 if (col >= skip && col < skip + maxc) {
                     if (inm) abAppend(ab, "\x1b[7m", 4);
+                    if (color >= 0) ab_fg(ab, color);
                     abAppend(ab, " ", 1);
+                    if (color >= 0) abAppend(ab, "\x1b[39m", 5);
                     if (inm) abAppend(ab, "\x1b[27m", 5);
                 }
                 col++;
@@ -142,7 +154,9 @@ static void render_line(struct abuf *ab, const char *raw, size_t rawlen,
         } else {
             if (col >= skip && col < skip + maxc) {
                 if (inm) abAppend(ab, "\x1b[7m", 4);
+                if (color >= 0) ab_fg(ab, color);
                 abAppend(ab, &c, 1);
+                if (color >= 0) abAppend(ab, "\x1b[39m", 5);
                 if (inm) abAppend(ab, "\x1b[27m", 5);
             }
             col++;
@@ -226,8 +240,7 @@ static void render_content(struct abuf *ab) {
     int rows = E.screen_rows - 1;
     int maxc = E.ed_cols;
     int skip = (int)E.left;
-    const char *q = (E.sqlen && (E.sactive || E.mode == MODE_SEARCH)) ? E.sq : NULL;
-    size_t qlen = q ? E.sqlen : 0;
+    Regex *qre = (E.sqre && (E.sactive || E.mode == MODE_SEARCH)) ? E.sqre : NULL;
     size_t s0 = SIZE_MAX, s1 = 0;
     if (E.mode == MODE_VISUAL) {
         if (E.mark <= E.cur) { s0 = E.mark; s1 = E.cur; }
@@ -270,8 +283,10 @@ static void render_content(struct abuf *ab) {
                     }
                 }
                 buf_line_slice(&E.buf, li, raw, rawcap);
+                HLSpan spans[64];
+                size_t nsp = E.hl ? hl_spans(E.hl, &E.buf, li, spans, 64) : 0;
                 render_line(ab, raw, strlen(raw), (size_t)skip, (size_t)maxc,
-                            q, qlen, hl0, hl1);
+                            qre, hl0, hl1, spans, nsp);
             }
             abAppend(ab, "\x1b[0K", 4);
         }

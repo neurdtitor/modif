@@ -1,16 +1,3 @@
-diff --git a/Makefile b/Makefile
-index 2f320ce..d4552c9 100644
---- a/Makefile
-+++ b/Makefile
-@@ -2,7 +2,7 @@ CC      ?= cc
- CFLAGS  ?= -O2 -std=c11 -Wall -Wextra
- LDLIBS   = $(shell uname -s | grep -q Linux && echo -lutil)
- 
--OBJS = main.o buffer.o terminal.o input.o edit.o fuzzy.o pty.o clipboard.o
-+OBJS = main.o buffer.o terminal.o input.o edit.o fuzzy.o pty.o clipboard.o mc.o
- 
- modif: $(OBJS)
- 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDLIBS)
 diff --git a/config.h b/config.h
 index 5803f1b..57732a4 100644
 --- a/config.h
@@ -26,7 +13,7 @@ index 5803f1b..57732a4 100644
  
  /* Normal-mode bindings. */
 diff --git a/edit.c b/edit.c
-index c52aa94..20b6bc5 100644
+index 1e57302..4ce0ae6 100644
 --- a/edit.c
 +++ b/edit.c
 @@ -8,6 +8,7 @@
@@ -37,8 +24,8 @@ index c52aa94..20b6bc5 100644
  
  Editor E;
  int g_quit = 0;
-@@ -110,13 +111,32 @@ static void ed_del_range(size_t pos, size_t n) {
-     E.dirty = 1;
+@@ -115,13 +116,32 @@ static void ed_del_range(size_t pos, size_t n) {
+     if (E.hl) hl_dirty(E.hl, li);
  }
  
 +/* Raw edit primitives exported to mc.c: apply an edit and record it in the
@@ -70,7 +57,7 @@ index c52aa94..20b6bc5 100644
      size_t len = gb_len(&E.buf.gb);
      if (E.cur >= len) return;
      ed_del_range(E.cur, 1);
-@@ -277,12 +297,18 @@ void cmd_page_up(void) { jump_lines(-(long)(E.screen_rows - 2)); }
+@@ -282,12 +302,18 @@ void cmd_page_up(void) { jump_lines(-(long)(E.screen_rows - 2)); }
  
  void cmd_enter_insert(void) { E.mode = MODE_INSERT; }
  void cmd_append(void) {
@@ -90,7 +77,7 @@ index c52aa94..20b6bc5 100644
      Line *l = &E.buf.lines[cur_line()];
      E.cur = l->start + l->len;
      E.mode = MODE_INSERT;
-@@ -995,7 +1021,7 @@ void edit_handle_key(int key) {
+@@ -1046,7 +1072,7 @@ void edit_handle_key(int key) {
      /* normal mode */
      if (leader_handle(key)) return;
      if (key == LEADER_KEY) { leader = 1; count_reset(); return; }
@@ -99,7 +86,7 @@ index c52aa94..20b6bc5 100644
      if (key >= '1' && key <= '9') {
          ncount = ncount * 10 + (size_t)(key - '0');
          if (ncount > 1000000) ncount = 1000000;
-@@ -1011,6 +1037,13 @@ void edit_handle_key(int key) {
+@@ -1062,6 +1088,13 @@ void edit_handle_key(int key) {
          if (normal_keys[i].key == key) { fn = normal_keys[i].fn; break; }
      if (!fn) { count_reset(); return; }
  
@@ -113,7 +100,7 @@ index c52aa94..20b6bc5 100644
      if (op && is_motion(fn)) { do_motion_op(fn); return; }
      if (op && fn == cmd_delete_line && op == OP_DELETE) { do_line_op(OP_DELETE); return; }
      if (op && fn == cmd_yank_line && op == OP_YANK) { do_line_op(OP_YANK); return; }
-@@ -1025,6 +1058,8 @@ void edit_handle_key(int key) {
+@@ -1076,6 +1109,8 @@ void edit_handle_key(int key) {
              if (li >= E.buf.nlines) li = E.buf.nlines - 1;
              E.cur = E.buf.lines[li].start;
              count_reset();
@@ -122,7 +109,7 @@ index c52aa94..20b6bc5 100644
          } else {
              fn();
          }
-@@ -1042,6 +1077,7 @@ void edit_handle_key(int key) {
+@@ -1093,6 +1128,7 @@ void edit_handle_key(int key) {
  void edit_after(void) {
      size_t len = gb_len(&E.buf.gb);
      if (E.cur > len) E.cur = len;
@@ -130,7 +117,7 @@ index c52aa94..20b6bc5 100644
      size_t content_rows = E.screen_rows > 1 ? (size_t)(E.screen_rows - 1) : 1;
      size_t li = cur_line();
      if (li < E.top) E.top = li;
-@@ -1098,12 +1134,17 @@ void edit_status(void) {
+@@ -1149,12 +1185,17 @@ void edit_status(void) {
      const char *m = E.mode == MODE_INSERT ? "INSERT"
                     : E.mode == MODE_VISUAL ? "VISUAL" : "NORMAL";
      const char *fname = E.buf.name ? E.buf.name : "[no file]";
@@ -149,27 +136,29 @@ index c52aa94..20b6bc5 100644
  }
  
  void edit_set_status(const char *fmt, ...) {
-@@ -1117,6 +1158,7 @@ void edit_set_status(const char *fmt, ...) {
+@@ -1168,7 +1209,8 @@ void edit_set_status(const char *fmt, ...) {
  void edit_init(void) {
      E.bl = malloc(sizeof(BufList));
      bl_init(E.bl);
+-    E.hl = hl_new();
++E.hl = hl_new();
 +    mc_init();
      buf_init(&E.buf);
      buf_build_lines(&E.buf); /* always at least one empty line */
      buf_add(&E.buf);
 diff --git a/edit.h b/edit.h
-index c3b9db6..261a511 100644
+index 5055537..6882bd9 100644
 --- a/edit.h
 +++ b/edit.h
-@@ -4,6 +4,7 @@
- #include <stddef.h>
- #include <time.h>
+@@ -6,6 +6,7 @@
  #include "buffer.h"
+ #include "regex.h"
+ #include "highlight.h"
 +#include "mc.h"
  
  typedef void (*cmd_fn)(void);
  typedef struct { int key; cmd_fn fn; } KeyBind;
-@@ -46,6 +47,7 @@ typedef struct {
+@@ -51,6 +52,7 @@ typedef struct {
      size_t fqlen;
      int fsel;
      int fbuf;         /* 1 = fuzzy matching open buffers, 0 = files */
@@ -177,7 +166,7 @@ index c3b9db6..261a511 100644
  } Editor;
  
  extern Editor E;
-@@ -95,6 +97,9 @@ void cmd_fuzzy(void);
+@@ -100,6 +102,9 @@ void cmd_fuzzy(void);
  void cmd_buf_prev(void);
  void cmd_buf_next(void);
  void cmd_buf_fuzzy(void);
@@ -188,7 +177,7 @@ index c3b9db6..261a511 100644
  void cmd_switch_focus(void);
  
 diff --git a/main.c b/main.c
-index 60dcccf..944bea2 100644
+index f0bf466..e34d0fe 100644
 --- a/main.c
 +++ b/main.c
 @@ -9,6 +9,7 @@
@@ -199,55 +188,66 @@ index 60dcccf..944bea2 100644
  
  /* ------------------------------- append buffer ---------------------------- */
  
-@@ -112,11 +113,12 @@ static void ab_bg(struct abuf *ab, int idx) {
+@@ -112,13 +113,14 @@ static void ab_bg(struct abuf *ab, int idx) {
  }
  
  /* Render a line's visible window [skip, skip+maxc), expanding tabs and
-- * highlighting occurrences of q and the selection range hl0..hl1
-- * (raw char indices within the line) in reverse video. */
-+ * highlighting occurrences of q, the selection range hl0..hl1 and any
+- * highlighting regex search matches and the selection range hl0..hl1 (raw
+- * char indices within the line) in reverse video, plus syntax colors from
+- * spans (also raw char indices). */
++ * highlighting regex search matches, the selection range hl0..hl1, and any
 + * multi-cursor positions in cc[0..ncc) (raw char indices within the line) in
-+ * reverse video. */
++ * reverse video, plus syntax colors from spans (also raw char indices). */
  static void render_line(struct abuf *ab, const char *raw, size_t rawlen,
-                         size_t skip, size_t maxc, const char *q, size_t qlen,
--                        size_t hl0, size_t hl1) {
-+                        size_t hl0, size_t hl1, const size_t *cc, size_t ncc) {
+                         size_t skip, size_t maxc, Regex *qre,
+                         size_t hl0, size_t hl1,
+-                        const HLSpan *spans, size_t nspans) {
++                        const HLSpan *spans, size_t nspans,
++                        const size_t *cc, size_t ncc) {
      size_t col = 0;
-     size_t mstart[32];
-     size_t nm = 0;
-@@ -125,32 +127,40 @@ static void render_line(struct abuf *ab, const char *raw, size_t rawlen,
-             if (!memcmp(raw + i, q, qlen)) mstart[nm++] = i;
+     size_t ms[32], me[32], nm = 0;
+     if (qre) {
+@@ -132,39 +134,48 @@ static void render_line(struct abuf *ab, const char *raw, size_t rawlen,
+             else break;
+         }
      }
-     size_t mi = 0;
 +    int padcur = 0;
 +    for (size_t k = 0; k < ncc; k++)
 +        if (cc[k] == rawlen) padcur = 1;
+     size_t mi = 0, si = 0;
      for (size_t i = 0; i < rawlen; i++) {
-         if (nm && mi < nm && i == mstart[mi] + qlen) mi++;
-         int inm = (nm && mi < nm && i >= mstart[mi]) || (i >= hl0 && i < hl1);
+         while (mi < nm && i >= me[mi]) mi++;
+         while (si < nspans && i >= spans[si].end) si++;
+         int inm = (mi < nm && i >= ms[mi] && i < me[mi]) || (i >= hl0 && i < hl1);
 +        int iscur = 0;
 +        for (size_t k = 0; k < ncc && !iscur; k++)
 +            if (cc[k] == i) iscur = 1;
+         int color = (si < nspans && i >= spans[si].start) ? spans[si].color : -1;
++        int rev = inm || iscur;
          char c = raw[i];
          if (c == '\t') {
              size_t stop = (col / MODIF_TABSTOP + 1) * MODIF_TABSTOP;
              while (col < stop) {
                  if (col >= skip && col < skip + maxc) {
 -                    if (inm) abAppend(ab, "\x1b[7m", 4);
-+                    if (inm || iscur) abAppend(ab, "\x1b[7m", 4);
++                    if (rev) abAppend(ab, "\x1b[7m", 4);
+                     if (color >= 0) ab_fg(ab, color);
                      abAppend(ab, " ", 1);
+                     if (color >= 0) abAppend(ab, "\x1b[39m", 5);
 -                    if (inm) abAppend(ab, "\x1b[27m", 5);
-+                    if (inm || iscur) abAppend(ab, "\x1b[27m", 5);
++                    if (rev) abAppend(ab, "\x1b[27m", 5);
                  }
                  col++;
              }
          } else {
              if (col >= skip && col < skip + maxc) {
 -                if (inm) abAppend(ab, "\x1b[7m", 4);
-+                if (inm || iscur) abAppend(ab, "\x1b[7m", 4);
++                if (rev) abAppend(ab, "\x1b[7m", 4);
+                 if (color >= 0) ab_fg(ab, color);
                  abAppend(ab, &c, 1);
+                 if (color >= 0) abAppend(ab, "\x1b[39m", 5);
 -                if (inm) abAppend(ab, "\x1b[27m", 5);
-+                if (inm || iscur) abAppend(ab, "\x1b[27m", 5);
++                if (rev) abAppend(ab, "\x1b[27m", 5);
              }
              col++;
          }
@@ -260,10 +260,10 @@ index 60dcccf..944bea2 100644
          col++;
      }
  }
-@@ -270,8 +280,17 @@ static void render_content(struct abuf *ab) {
-                     }
-                 }
+@@ -285,8 +296,17 @@ static void render_content(struct abuf *ab) {
                  buf_line_slice(&E.buf, li, raw, rawcap);
+                 HLSpan spans[64];
+                 size_t nsp = E.hl ? hl_spans(E.hl, &E.buf, li, spans, 64) : 0;
 +                size_t cc[64], ncc = 0;
 +                if (mc_active()) {
 +                    Line *l = &E.buf.lines[li];
@@ -274,8 +274,8 @@ index 60dcccf..944bea2 100644
 +                    }
 +                }
                  render_line(ab, raw, strlen(raw), (size_t)skip, (size_t)maxc,
--                            q, qlen, hl0, hl1);
-+                            q, qlen, hl0, hl1, cc, ncc);
+-                            qre, hl0, hl1, spans, nsp);
++                            qre, hl0, hl1, spans, nsp, cc, ncc);
              }
              abAppend(ab, "\x1b[0K", 4);
          }

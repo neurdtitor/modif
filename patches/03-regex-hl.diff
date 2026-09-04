@@ -1,0 +1,81 @@
+diff --git a/hl_lang_c.c b/hl_lang_c.c
+new file mode 100644
+index 0000000..5ef45de
+--- /dev/null
++++ b/hl_lang_c.c
+@@ -0,0 +1,34 @@
++#include "highlight.h"
++
++/* C / C++ / header-file syntax rules. The block comment uses a per-line
++ * state bit: the opening sets it, the closing clears it, and everything
++ * between is colored as a comment even across lines. */
++
++#define CM 8  /* comment (gray) */
++#define ST 6  /* string (cyan) */
++#define NU 3  /* number (yellow) */
++#define KW 4  /* keyword (blue) */
++#define PP 5  /* preprocessor (magenta) */
++
++static const HLRule c_rules[] = {
++    { "/\\*",                    CM, 1, 0 }, /* block comment open */
++    { "\\*/",                    CM, 0, 1 }, /* block comment close */
++    { "//[^\\n]*",               CM, 0, 0 }, /* line comment */
++    { "\"[^\"]*\"",              ST, 0, 0 }, /* string */
++    { "'[^']*'",                 ST, 0, 0 }, /* char literal */
++    { "#[A-Za-z_][A-Za-z0-9_]*", PP, 0, 0 }, /* preprocessor directive */
++    { "\\b[0-9][0-9a-zA-Z_.]*\\b", NU, 0, 0 }, /* number */
++    { "\\b(if|else|for|while|do|return|switch|case|break|continue|goto|"
++      "sizeof|typedef|struct|union|enum|static|extern|const|volatile|register|"
++      "int|char|float|double|void|long|short|unsigned|signed)\\b", KW, 0, 0 },
++};
++
++static const Lang lang_c = {
++    "c",
++    { "c", "h", "cc", "cpp" },
++    c_rules,
++    sizeof c_rules / sizeof c_rules[0],
++    CM,
++};
++
++__attribute__((constructor)) static void reg_c(void) { hl_register(&lang_c); }
+\ No newline at end of file
+diff --git a/hl_lang_py.c b/hl_lang_py.c
+new file mode 100644
+index 0000000..3d18c38
+--- /dev/null
++++ b/hl_lang_py.c
+@@ -0,0 +1,33 @@
++#include "highlight.h"
++
++/* Python syntax rules. Triple-quoted strings use the same state bit as C
++ * block comments: the opening and closing delimiter are one rule that sets
++ * and clears the bit, so the whole region colors as a string. */
++
++#define CM 8  /* comment (gray) */
++#define ST 6  /* string (cyan) */
++#define NU 3  /* number (yellow) */
++#define KW 4  /* keyword (blue) */
++#define DE 5  /* decorator / magic (magenta) */
++
++static const HLRule py_rules[] = {
++    { "#.*",                     CM, 0, 0 }, /* comment */
++    { "\"\"\"|\'\'\'",           ST, 1, 1 }, /* triple-quoted string open/close */
++    { "\"[^\"\\n]*\"",           ST, 0, 0 }, /* string */
++    { "'[^'\\n]*'",              ST, 0, 0 }, /* string */
++    { "@[A-Za-z_][A-Za-z0-9_.]*", DE, 0, 0 }, /* decorator */
++    { "\\b[0-9][0-9a-zA-Z_.]*\\b", NU, 0, 0 }, /* number */
++    { "\\b(def|class|if|elif|else|for|while|return|import|from|as|with|"
++      "try|except|finally|raise|lambda|yield|pass|break|continue|and|or|not|"
++      "in|is|None|True|False|global|nonlocal|assert|del)\\b", KW, 0, 0 },
++};
++
++static const Lang lang_py = {
++    "python",
++    { "py", "pyw" },
++    py_rules,
++    sizeof py_rules / sizeof py_rules[0],
++    ST,
++};
++
++__attribute__((constructor)) static void reg_py(void) { hl_register(&lang_py); }
+\ No newline at end of file
